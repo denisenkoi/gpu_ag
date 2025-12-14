@@ -1,0 +1,28 @@
+{
+  "test_description": "Last 4 segments from current interpretation",
+  "shifts": [
+    -15.07039340821462,
+    -15.433581800412792,
+    -15.824453781641616,
+    -16.289714197184935
+  ],
+  "objective_function_result": 0.00042138593474439547,
+  "parameters": {
+    "pearson_power": 2.0,
+    "mse_power": 0.001,
+    "num_intervals_self_correlation": 20,
+    "sc_power": 1.15,
+    "angle_range": 10.0,
+    "angle_sum_power": 2.0,
+    "min_pearson_value": -1
+  },
+  "segments_count": 3,
+  "well_md_range": [
+    2743.2000000000003,
+    4079.748
+  ],
+  "typewell_tvd_range": [
+    2739.8472000000006,
+    3630.5032799970113
+  ]
+}

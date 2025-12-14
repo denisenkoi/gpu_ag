@@ -49,6 +49,45 @@
 
 **Phase 1: COMPLETED** - CPU baseline reproduces original results
 
+## [2025-12-15 01:45] Test Checkpoint Script
+
+Created `test_checkpoint.py` to calculate reference values for numpy refactoring validation.
+
+**How it works:**
+1. Loads well data from `AG_DATA/InitialData/slicing_well.json` (same as emulator)
+2. Creates `Well(well_data)` and `TypeWell(well_data)` objects
+3. Loads current interpretation from StarSteer `interpretation.json`
+4. Takes last 4 segments
+5. Calls `objective_function_optimizer()` with all parameters
+6. Saves checkpoint values to `test_checkpoint_values.json`
+
+**Parameters used (from python_autogeosteering_executor.py defaults):**
+- pearson_power = 2.0
+- mse_power = 0.001
+- num_intervals_self_correlation = 20
+- sc_power = 1.15
+- angle_range = 10.0
+- angle_sum_power = 2.0
+- min_pearson_value = -1
+
+**Key files for data loading:**
+- `ag_objects/ag_obj_well.py`: `Well(json_data)` - extracts `well['points']`, `wellLog['points']`
+- `ag_objects/ag_obj_typewell.py`: `TypeWell(json_data)` - extracts `typeLog['tvdSortedPoints']`
+- `ag_objects/ag_obj_interpretation.py`: `create_segments_from_json(json_segments, well)`
+
+**Checkpoint values (reference for numpy validation):**
+```json
+{
+  "shifts": [-15.07, -15.43, -15.82, -16.29],
+  "objective_function_result": 0.000421,
+  "segments_count": 3,
+  "well_md_range": [2743.2, 4079.7],
+  "typewell_tvd_range": [2739.8, 3630.5]
+}
+```
+
+**Next:** Numpy refactoring - when done, run test_checkpoint.py and compare result with 0.000421
+
 ### Batch File Location
 
 ```
