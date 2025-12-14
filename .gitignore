@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+run_logs/
+
+# Results and outputs
+results/
+output/
+*.csv
+*.json
+!tests/fixtures/*.json
+
+# Large files
+*.zip
+*.7z
+*.tar.gz
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary
+temp_work/
+task_queue/
+task_logs/
