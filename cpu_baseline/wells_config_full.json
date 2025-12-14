@@ -1,0 +1,668 @@
+{
+  "project_name": "EF_AG_anonym_automation",
+  "wells": [
+    {
+      "well_name": "Well101~EGFDL",
+      "lateral_log_name": "GR",
+      "typewell_name": "Well6",
+      "typewell_log_name": "Mauch 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well102_landing~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1353",
+      "typewell_log_name": "Hyde 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well104~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1984",
+      "typewell_log_name": "Sugarloaf Unit 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well105~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1983",
+      "typewell_log_name": "Berdie Unit 6PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well106~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1972",
+      "typewell_log_name": "Yosko Unit 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well107_landing~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well869",
+      "typewell_log_name": "Carter 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well108~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well505",
+      "typewell_log_name": "Pseudo GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1000~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well744",
+      "typewell_log_name": "BRYSCH-JONAS UNIT C 5H 90.0 DL GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": true
+    },
+    {
+      "well_name": "Well1002_landing~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1094",
+      "typewell_log_name": "Kraner Unit 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1007~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1994",
+      "typewell_log_name": "Challenger Unit C 5PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1008_landing~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1991",
+      "typewell_log_name": "San Christoval Ranch B 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1010~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1694",
+      "typewell_log_name": "Henke A Unit 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1012~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1969",
+      "typewell_log_name": "GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1014_landing~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1977",
+      "typewell_log_name": "May Ryan Unit A 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1015~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1978",
+      "typewell_log_name": "Jauer Peck Unit 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1016~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1972",
+      "typewell_log_name": "Yosko Unit 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1017~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well856",
+      "typewell_log_name": "Middle McCowen 12PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1018~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1972",
+      "typewell_log_name": "Yosko Unit 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1019~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1974",
+      "typewell_log_name": "GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1022~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well2029",
+      "typewell_log_name": "Middle McCowen 29PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1023~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well819",
+      "typewell_log_name": "Chapman Pfeil Unit 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1028~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well204",
+      "typewell_log_name": "Tipton Jonas Unit 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1029~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well204",
+      "typewell_log_name": "Tipton Jonas Unit 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1031~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1694",
+      "typewell_log_name": "Henke A Unit 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1033_landing~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well2016",
+      "typewell_log_name": "Guajillo East 79PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1035~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well2016",
+      "typewell_log_name": "Guajillo East 79PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1039~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well2016",
+      "typewell_log_name": "Guajillo East 79PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1041~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well856",
+      "typewell_log_name": "Middle McCowen 12PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1042~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1974",
+      "typewell_log_name": "GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1043~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well819",
+      "typewell_log_name": "Chapman Pfeil Unit 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1047~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1972",
+      "typewell_log_name": "Yosko Unit 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1048~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1974",
+      "typewell_log_name": "GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1049~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1694",
+      "typewell_log_name": "Henke A Unit 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1050~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well2016",
+      "typewell_log_name": "Guajillo East 79PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1052~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1984",
+      "typewell_log_name": "Sugarloaf Unit 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1054~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1232",
+      "typewell_log_name": "Guajillo East 79PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1055~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well2004",
+      "typewell_log_name": "Scheele Unit 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1056_landing~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well2016",
+      "typewell_log_name": "Guajillo East 79PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1061_landing~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well18",
+      "typewell_log_name": "Wye Ranch 1 PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1063~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1105",
+      "typewell_log_name": "Medina Jonas Unit A 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1065~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well6",
+      "typewell_log_name": "Mauch 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1068~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well2003",
+      "typewell_log_name": "McCoy-Egbert Unit 2PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1071~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well856",
+      "typewell_log_name": "Middle McCowen 12PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1072~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well6",
+      "typewell_log_name": "Mauch 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1073~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well2016",
+      "typewell_log_name": "Guajillo East 79PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1075~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well2004",
+      "typewell_log_name": "Scheele Unit 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1076~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1785",
+      "typewell_log_name": "Childrens Weston 2PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1080~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1994",
+      "typewell_log_name": "Challenger Unit C 5PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1081~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1032",
+      "typewell_log_name": "R May B 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1082~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1465",
+      "typewell_log_name": "Sienkiewicz Unit 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1084_landing~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1984",
+      "typewell_log_name": "Sugarloaf Unit 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1085~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well518",
+      "typewell_log_name": "Free Unit 1PH",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1089~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1974",
+      "typewell_log_name": "GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1090~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well204",
+      "typewell_log_name": "Tipton Jonas Unit 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1095~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well2003",
+      "typewell_log_name": "McCoy-Egbert Unit 2PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1097~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1977",
+      "typewell_log_name": "May Ryan Unit A 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1098_landing~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1105",
+      "typewell_log_name": "Medina Jonas Unit A 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1099~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1972",
+      "typewell_log_name": "Yosko Unit 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1100~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1785",
+      "typewell_log_name": "Childrens Weston 2PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1103~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well296",
+      "typewell_log_name": "Guajillo Unit 15 South 3H GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1104~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well6",
+      "typewell_log_name": "Mauch 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1108~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well204",
+      "typewell_log_name": "Tipton Jonas Unit 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1109~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1991",
+      "typewell_log_name": "San Christoval Ranch B 1PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1110~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well2043",
+      "typewell_log_name": "Whitsett Posey 1PH",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1116~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well1967",
+      "typewell_log_name": "Turnbull Unit 6PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    },
+    {
+      "well_name": "Well1119~EGFDL",
+      "lateral_log_name": "GR_fix",
+      "typewell_name": "Well2016",
+      "typewell_log_name": "Guajillo East 79PH GR",
+      "horizon_name": "EGFDL",
+      "grid_name": "EGFDL1_full",
+      "enable_log_normalization": true,
+      "process": false
+    }
+  ],
+  "output_format": "json",
+  "log_level": "INFO",
+  "keep_debug_files": false
+}
