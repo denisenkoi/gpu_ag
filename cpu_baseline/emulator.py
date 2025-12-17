@@ -42,16 +42,23 @@ from wells_state_manager import (
     print_state_summary
 )
 
-# Import PAPI loader for nightguard mode
-from papi_loader import PAPILoader
-
-# Import PAPI uploader if enabled
-from papi_export.uploaders.interpretation_uploader import InterpretationUploader
-
-# Import Night Guard Alert System
+# Light imports (no rogii_solo dependency)
 from alerts.alert_analyzer import AlertAnalyzer
 from alerts.starsteer_target_line_interface import StarSteerTargetLineInterface
 from night_guard_logger import NightGuardLogger
+
+# Lazy imports for PAPI/Solo dependencies (only needed in PAPI mode, not starsteer)
+PAPILoader = None
+InterpretationUploader = None
+
+def _lazy_import_papi():
+    """Lazy import PAPI dependencies only when needed (not in starsteer mode)"""
+    global PAPILoader, InterpretationUploader
+    if PAPILoader is None:
+        from papi_loader import PAPILoader as _PAPILoader
+        from papi_export.uploaders.interpretation_uploader import InterpretationUploader as _InterpretationUploader
+        PAPILoader = _PAPILoader
+        InterpretationUploader = _InterpretationUploader
 
 # Import AG visualization if enabled
 from ag_visualization.ag_visual_edit import InteractivePlot
@@ -324,6 +331,7 @@ class DrillingEmulator:
                     'enable_log_normalization': True,
                     'process': True
                 }
+                _lazy_import_papi()  # Load PAPI dependencies only when needed
                 self._shared_papi_loader = PAPILoader(well_name=well_name, config_dict=config_dict, ng_logger=self.ng_logger)
                 logger.info(f"NIGHT_GUARD_DEBUG: Created shared PAPI Loader instance ID: {id(self._shared_papi_loader)}")
 
@@ -426,6 +434,7 @@ class DrillingEmulator:
                     project_measure_unit = None
 
             if project_measure_unit:
+                _lazy_import_papi()  # Load PAPI dependencies
                 self.papi_uploader = InterpretationUploader(project_measure_unit=project_measure_unit)
                 logger.info(f"InterpretationUploader initialized with project units: {project_measure_unit}")
             else:
@@ -1518,7 +1527,7 @@ class DrillingEmulator:
 
             # Initialize InterpretationUploader if enabled and not yet initialized
             if self.papi_upload_enabled and self.papi_uploader is None:
-                from papi_export.uploaders.interpretation_uploader import InterpretationUploader
+                _lazy_import_papi()  # Load PAPI dependencies
                 self.papi_uploader = InterpretationUploader(project_measure_unit=project_measure_unit)
                 logger.info(f"InterpretationUploader initialized with project units: {project_measure_unit}")
 

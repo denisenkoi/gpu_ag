@@ -1,0 +1,8 @@
+{"timestamp": 1765964219.8445015, "datetime": "2025-12-17 12:36:59", "command": "OPEN_PROJECT", "params": {"projectName": "EF_AG_anonym_automation_local"}}
+{"timestamp": 1765964245.9235637, "datetime": "2025-12-17 12:37:25", "command": "SELECT_WELL", "params": {"wellUuid": "{d00e7d35-4848-4242-b6a9-448b838f8e14}"}}
+{"timestamp": 1765964254.9565563, "datetime": "2025-12-17 12:37:34", "command": "INIT_WELL_SLICER", "params": {"sourceWellUuid": "{d00e7d35-4848-4242-b6a9-448b838f8e14}", "targetWellName": "slicing_well", "cutoffMD": 0, "additionalMD": 90.0}}
+{"timestamp": 1765964263.9846756, "datetime": "2025-12-17 12:37:43", "command": "SELECT_WELL", "params": {"wellUuid": "{a3ad0535-58ad-4673-9a34-44df42ca9a6c}"}}
+{"timestamp": 1765964273.0138495, "datetime": "2025-12-17 12:37:53", "command": "COPY_INTERPRETATION", "params": {"sourceInterpretationUuid": "{f806261e-c6ba-4cfb-b198-dc2388aaa879}", "targetInterpretationName": "Assisted"}}
+{"timestamp": 1765964285.0473778, "datetime": "2025-12-17 12:38:05", "command": "SELECT_INTERPRETATION", "params": {"interpretationUuid": "{bd68c297-f1e6-4756-8241-3a18e3c83e73}"}}
+{"timestamp": 1765964294.0764103, "datetime": "2025-12-17 12:38:14", "command": "CONFIGURE_AG_SETTINGS", "params": {"dipRange": 2.0, "agStartMD": 3899.9999999999995, "logName": "GR_fix", "typelogWellName": "Well744", "typelogName": "BRYSCH-JONAS UNIT C 5H 90.0 DL GR", "horizonSmoothness": 3.0, "gridName": "EGFDL1_full"}}
+{"timestamp": 1765964302.10968, "datetime": "2025-12-17 12:38:22", "command": "START_AG", "params": {}}

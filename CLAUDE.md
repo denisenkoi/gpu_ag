@@ -1,5 +1,24 @@
 # GPU Autogeosteering Optimization Project
 
+## ВАЖНО: Рабочие директории
+
+**Код разрабатывается в:** `/mnt/e/Projects/Rogii/gpu_ag/`
+**Триггеры кладем в:** `/mnt/e/Projects/Rogii/sc/task_queue/`
+**BAT файлы в:** `/mnt/e/Projects/Rogii/bats/`
+**bot_id для триггеров:** `"SSAndAG"`
+
+## Режимы запуска
+
+**Валидация (без триггеров):**
+- `test_checkpoint.py` - проверка intermediate values
+- `test_numpy_*.py` - проверка numpy функций
+- `test_torch_*.py` - проверка torch функций
+- Запуск: локально через Python
+
+**Полный прогон DE (через триггер):**
+- `slicer_de_3iter.bat` - CPU baseline
+- Будущее: `slicer_de_gpu.bat` с флагом `--use-torch`
+
 ## Project Structure
 
 ```

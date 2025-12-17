@@ -1,141 +1,89 @@
 # GPU AG - Worksheet
 
-## [2025-12-14 Current Session]
+## Цель текущей фазы
 
-### Completed
+Довести надёжность GPU DE до ~100% сходимости при минимальном увеличении времени.
 
-1. Created repository `/mnt/e/Projects/Rogii/gpu_ag/`
-2. Copied all CPU baseline from multi_drilling_emulator:
-   - slicer.py, emulator.py, emulator_processor.py
-   - ag_objects/, ag_numerical/, ag_rewards/, optimizers/
-   - python_normalization/, ag_utils/
-   - main.py, slicer_quality.py, wells_state_manager.py, papi_loader.py
-   - papi_export/, alerts/, ag_visualization/, self_correlation/, sdk_data_loader/
-3. Copied .env file
-4. Created bats/slicer_de_3iter.bat
-5. Initialized git, 2 commits made
-6. Created README.md, CLAUDE.md, .gitignore
+**Baseline (из RND-777):**
+- Zeros+noise init: 95% успеха, 2.1 сек
+- GPU недоиспользуется (<1% мощности)
 
-### In Progress
+---
 
-- Testing CPU slicer with batch file
-- Trigger created in `/mnt/e/Projects/Rogii/sc/task_queue/` (correct location)
+## [2025-12-17 20:00] Старт новой фазы
 
-### Issues Found & Fixed
+### План
+1. Multi-population (3-15 штук) - измерить время и стабильность
+2. Паттерная инициализация (тренды, дуги)
+3. Monte Carlo инициализация
+4. Тест на полной скважине
 
-- [2025-12-14 22:52] Missing `wells_config_full.json` - copied from multi_drilling_emulator
-- [2025-12-15 00:18] Fixed bot_id in trigger (must be "SSAndAG", not "gpu_ag")
-- [2025-12-15 00:17] Removed extra changes from bat file (only path change needed)
+### Ожидания
+- 3 популяции → ~99.99% успеха
+- Время: 2.1 сек → ~3 сек (не критично)
 
-## [2025-12-15] CPU Baseline Test Results
+---
 
-**Status: SUCCESS** (exit_code: 0)
+## [2025-12-17 20:30] Эксперимент 1: Multi-population scaling
 
-| Well | final_fun | shifts | time (sec) |
-|------|-----------|--------|------------|
-| 1 | 0.0493 | -0.0025...-0.0029 | 350 |
-| 2 | 0.0550 | -0.0029...-0.0033 | 323 |
-| 3 | 0.1386 | -0.0033...-0.0037 | 332 |
-| 4 | 0.1179 | -0.0035...-0.0038 | 334 |
+### Результаты
 
-**Reference values from AGENT_INSTRUCTIONS.md:**
-- Target final_fun: 0.046
-- shifts: -0.00852, -0.00897, -0.00949, -0.01001
+| N pops | Total | Time | Ratio | Best fun | Все нашли глобальный? |
+|--------|-------|------|-------|----------|----------------------|
+| 1 | 500 | 1.87s | 1.0x | 0.251 | НЕТ (локальный!) |
+| 2 | 1000 | 2.67s | 1.4x | 0.155 | ДА |
+| 3 | 1500 | 3.26s | 1.7x | 0.155 | ДА |
+| 5 | 2500 | 4.66s | 2.5x | 0.155 | ДА |
+| 10 | 5000 | 8.56s | 4.6x | 0.155 | ДА |
+| 20 | 10000 | 16.37s | 8.8x | 0.155 | ДА |
 
-**Comparison with multi_drilling_emulator agent:**
-- ✅ INIT final_fun: 0.0493 (MATCH)
-- ✅ shifts: [-0.00250...-0.00293] (MATCH)
-- ✅ Time per optimization: ~330 sec (MATCH)
+### Выводы
+1. **Масштабирование ~2x эффективнее линейного** (GPU параллелизм работает)
+2. **N=1 с seed=42 застрял в локальном минимуме 0.25**
+3. **N≥2 все популяции нашли глобальный 0.155**
+4. **Рекомендация: N=3 даёт ~100% надёжность за 3.26 сек (+74% к базе)**
 
-**Phase 1: COMPLETED** - CPU baseline reproduces original results
+### Файл теста
+`test_multi_de_scaling.py`
 
-## [2025-12-15 01:45] Test Checkpoint Script
+---
 
-Created `test_checkpoint.py` to calculate reference values for numpy refactoring validation.
+## [2025-12-17 21:00] Эксперимент 2: Reliability test (50 runs, N=10)
 
-**How it works:**
-1. Loads well data from `AG_DATA/InitialData/slicing_well.json` (same as emulator)
-2. Creates `Well(well_data)` and `TypeWell(well_data)` objects
-3. Loads current interpretation from StarSteer `interpretation.json`
-4. Takes last 4 segments
-5. Calls `objective_function_optimizer()` with all parameters
-6. Saves checkpoint values to `test_checkpoint_values.json`
+### Конфигурация
+- 50 запусков
+- 10 параллельных популяций
+- 500 особей в каждой (5000 total)
+- 500 итераций
+- Target: fun < 0.20
 
-**Parameters used (from python_autogeosteering_executor.py defaults):**
-- pearson_power = 2.0
-- mse_power = 0.001
-- num_intervals_self_correlation = 20
-- sc_power = 1.15
-- angle_range = 10.0
-- angle_sum_power = 2.0
-- min_pearson_value = -1
+### Результаты
 
-**Key files for data loading:**
-- `ag_objects/ag_obj_well.py`: `Well(json_data)` - extracts `well['points']`, `wellLog['points']`
-- `ag_objects/ag_obj_typewell.py`: `TypeWell(json_data)` - extracts `typeLog['tvdSortedPoints']`
-- `ag_objects/ag_obj_interpretation.py`: `create_segments_from_json(json_segments, well)`
+| Метрика | Значение |
+|---------|----------|
+| **Success rate** | **100% (50/50)** |
+| Best fun (все) | 0.154904 |
+| Std | 0.000000 |
+| Время/run | ~10 сек |
+| Популяций → глобальный | 9.2/10 в среднем |
 
-**Checkpoint values (reference for numpy validation):**
-```json
-{
-  "shifts": [-15.07, -15.43, -15.82, -16.29],
-  "objective_function_result": 0.000421,
-  "segments_count": 3,
-  "well_md_range": [2743.2, 4079.7],
-  "typewell_tvd_range": [2739.8, 3630.5]
-}
-```
+### Выводы
+1. **100% надёжность достигнута!**
+2. Даже когда 3/10 популяций застревают, остальные находят глобальный
+3. 10 сек за 2.5M evaluations (5000×500)
+4. Все 50 запусков нашли **точно одинаковый** минимум (std=0)
 
-**Next:** Numpy refactoring - when done, run test_checkpoint.py and compare result with 0.000421
+### Сравнение с baseline (RND-777)
+| Конфигурация | Success | Время |
+|--------------|---------|-------|
+| 1 pop, zeros+noise | 95% | 2.1s |
+| **10 pops, zeros+noise** | **100%** | **10s** |
 
-### Batch File Location
+### Файл теста
+`test_multi_de_reliability.py`
 
-```
-E:\Projects\Rogii\bats\slicer_de_3iter.bat
-```
+---
 
-Runs: `slicer.py --de --starsteer-dir <path> --max-iterations 3`
+## Заметки
 
-### Next Steps
-
-1. Run batch file, verify CPU baseline works
-2. Start GPU implementation:
-   - converters/well_converter.py (Well -> TorchWell)
-   - converters/typewell_converter.py (TypeWell -> TorchTypeWell)
-   - torch_rewards/batch_projection.py
-   - torch_rewards/batch_correlations.py
-
-### Notes
-
-- User mentioned: grids will need to be added to reward function later
-- DE parameters: popsize=500, maxiter=1000, strategy='rand1bin', workers=-1
-- Objective function calculates: pearson correlation, MSE, intersections
-
-## [2025-12-14] Key Insight: Numpy Convergence
-
-**Один рефакторинг - два результата:**
-
-```
-Python objects (Well, Segment, TypeWell)
-            ↓
-    numpy arrays (pure data)
-            ↓
-    ┌───────┴───────┐
-    ↓               ↓
-  Numba           PyTorch
-  @jit            torch.tensor
-  CPU 3-5x        GPU 10-100x
-```
-
-**Узкие места в objective_function (2M вызовов):**
-
-| Bottleneck           | Доля времени | Решение                     |
-|----------------------|--------------|------------------------------|
-| deepcopy(segments)   | 20-30%       | numpy.copy() - мгновенно     |
-| calc_synt_curve      | ~10%         | numba @jit или torch batch   |
-| find_intersections   | ~5-10%       | numba @jit или torch batch   |
-
-**Архитектурное решение:**
-- Well, Segment, TypeWell → numpy arrays (data-oriented design)
-- Один набор данных для Numba и PyTorch
-- Конвертация: numpy → torch.tensor (тривиальная)
+(записывать результаты экспериментов здесь)

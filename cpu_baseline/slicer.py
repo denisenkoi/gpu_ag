@@ -304,8 +304,9 @@ class StarSteerSlicerOrchestrator:
         return True
 
     def _launch_starsteer(self):
-        """Launch StarSteer directly via subprocess"""
+        """Launch StarSteer - via trigger on WSL, direct on Windows"""
         import subprocess
+        import platform
 
         # StarSteer executable path
         starsteer_exe = self.starsteer_dir / "StarSteer.exe"
@@ -315,16 +316,56 @@ class StarSteerSlicerOrchestrator:
 
         logger.info(f"Launching StarSteer: {starsteer_exe}")
 
-        # Launch StarSteer in background (detached process)
-        subprocess.Popen(
-            [str(starsteer_exe)],
-            cwd=str(self.starsteer_dir),
-            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
+        # Check if running on Linux (WSL) - use trigger system
+        if platform.system() == 'Linux':
+            self._launch_starsteer_via_trigger()
+        else:
+            # Windows - direct launch
+            subprocess.Popen(
+                [str(starsteer_exe)],
+                cwd=str(self.starsteer_dir),
+                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            logger.info("StarSteer launched")
 
-        logger.info("StarSteer launched")
+    def _launch_starsteer_via_trigger(self):
+        """Launch StarSteer via task runner trigger (for WSL)"""
+        import time as time_module
+
+        # Trigger directory - use sc project task_queue
+        trigger_dir = Path("/mnt/e/Projects/Rogii/sc/task_queue")
+        trigger_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create trigger file
+        timestamp = int(time_module.time())
+        task_id = f"task_{timestamp}_starsteer"
+        trigger_file = trigger_dir / f"{task_id}.json"
+
+        trigger_data = {
+            "task_id": task_id,
+            "type": "run_bat",
+            "script_path": "runss_slicer_de.bat",
+            "bot_id": "GPU_Slicer",
+            "created_at": timestamp
+        }
+
+        with open(trigger_file, 'w') as f:
+            json.dump(trigger_data, f)
+
+        logger.info(f"Created StarSteer trigger: {trigger_file}")
+        logger.info("Waiting for task runner to pick up trigger...")
+
+        # Wait for trigger to be processed (file will be deleted by task runner)
+        wait_start = time_module.time()
+        while trigger_file.exists():
+            if time_module.time() - wait_start > 30:
+                logger.warning("Trigger not picked up in 30s, continuing anyway...")
+                break
+            time_module.sleep(1)
+
+        logger.info("StarSteer trigger processed, waiting for application...")
 
     def _wait_starsteer_ready(self, timeout: int = 60):
         """Wait for StarSteer ready"""

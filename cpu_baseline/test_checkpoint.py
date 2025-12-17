@@ -87,6 +87,24 @@ def main():
 
     print(f"\nobjective_function_optimizer result: {result}")
 
+    # Get intermediate results (tvt and synt_curve are filled by objective_function)
+    # We need to find the indices for our segments
+    start_idx = segments[0].start_idx
+    end_idx = segments[-1].end_idx
+
+    print(f"\nIntermediate results for indices {start_idx} to {end_idx}:")
+    print(f"  well.tvt range: {well.tvt[start_idx]:.4f} to {well.tvt[end_idx]:.4f}")
+    print(f"  well.synt_curve range: {well.synt_curve[start_idx]:.4f} to {well.synt_curve[end_idx]:.4f}")
+    print(f"  well.value range: {well.value[start_idx]:.4f} to {well.value[end_idx]:.4f}")
+
+    # Extract arrays for checkpoint (convert to list for JSON)
+    tvt_slice = well.tvt[start_idx:end_idx+1].tolist()
+    synt_curve_slice = well.synt_curve[start_idx:end_idx+1].tolist()
+    value_slice = well.value[start_idx:end_idx+1].tolist()
+    md_slice = well.measured_depth[start_idx:end_idx+1].tolist()
+
+    print(f"  Array length: {len(tvt_slice)} points")
+
     # Save checkpoint values
     checkpoint = {
         "test_description": "Last 4 segments from current interpretation",
@@ -102,8 +120,15 @@ def main():
             "min_pearson_value": min_pearson_value,
         },
         "segments_count": len(segments),
+        "segment_indices": {"start_idx": int(start_idx), "end_idx": int(end_idx)},
         "well_md_range": [float(well.measured_depth.min()), float(well.measured_depth.max())],
         "typewell_tvd_range": [float(typewell.tvd.min()), float(typewell.tvd.max())],
+        "intermediate_results": {
+            "md": md_slice,
+            "tvt": tvt_slice,
+            "synt_curve": synt_curve_slice,
+            "value": value_slice,
+        }
     }
 
     checkpoint_path = Path(__file__).parent / "test_checkpoint_values.json"
