@@ -84,6 +84,34 @@
 
 ---
 
+## [2025-12-17 21:45] Интеграция multi-population DE в gpu_optimizer_fit
+
+### Изменения
+- Обновлён `gpu_optimizer_fit.py`:
+  - Добавлена функция `run_multi_population_de()`
+  - N=10 популяций по 500 особей
+  - Zeros+noise инициализация
+  - Island model (изолированные популяции)
+
+### Конфигурация
+```python
+N_POPULATIONS = 10      # 10 параллельных популяций
+POPSIZE_EACH = 500      # 500 особей в каждой
+MAXITER = 500           # 500 итераций
+```
+
+### Тест
+```
+Time: 8.72s
+Best fun: 0.154904
+Pops found global: 9/10
+```
+
+### Интеграция со slicer
+`slicer_gpu.py` автоматически использует обновлённый `gpu_optimizer_fit.py` через monkey-patch.
+
+---
+
 ## Заметки
 
 (записывать результаты экспериментов здесь)
