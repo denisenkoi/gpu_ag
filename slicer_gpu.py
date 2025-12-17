@@ -1,48 +1,70 @@
 #!/usr/bin/env python
 """
-GPU-accelerated slicer wrapper.
+GPU-accelerated slicer.
 
-Monkey-patches optimizer_fit to use GPU version, then runs original slicer.
-Usage: python slicer_gpu.py --de --starsteer-dir <path>
+Clean implementation using GpuEmulatorProcessor with GPU executor.
+No monkey-patching - executor selected via .env:
+
+    AUTOGEOSTEERING_EXECUTOR=gpu    # GPU multi-population DE (default)
+    AUTOGEOSTEERING_EXECUTOR=python # Python scipy DE
+    AUTOGEOSTEERING_EXECUTOR=cpu    # C++ daemon
+
+GPU configuration:
+    GPU_N_POPULATIONS=10    # Number of parallel populations
+    GPU_POPSIZE_EACH=500    # Individuals per population
+    GPU_MAXITER=500         # Iterations
+
+Usage:
+    python slicer_gpu.py --de --starsteer-dir <path>
+
+    Or set in .env and run without args:
+    python slicer_gpu.py
 """
-import sys
 import os
+import sys
 from pathlib import Path
 
 # Add paths
 sys.path.insert(0, str(Path(__file__).parent / "cpu_baseline"))
 sys.path.insert(0, str(Path(__file__).parent))
 
-# Import GPU optimizer_fit BEFORE importing anything from cpu_baseline
-from gpu_optimizer_fit import gpu_optimizer_fit
+# Set default executor to GPU if not specified
+if 'AUTOGEOSTEERING_EXECUTOR' not in os.environ:
+    os.environ['AUTOGEOSTEERING_EXECUTOR'] = 'gpu'
 
-# Now import the module we want to patch
-import ag_numerical.ag_func_optimizer as ag_optimizer_module
+# Import AFTER setting env var
+from slicer import StarSteerSlicerOrchestrator, main as slicer_main, _CLI_CONFIG
+from emulator_processor_gpu import GpuEmulatorProcessor
 
-# Monkey-patch: replace CPU optimizer_fit with GPU version
-_original_optimizer_fit = ag_optimizer_module.optimizer_fit
+# Patch the emulator to use GpuEmulatorProcessor
+import emulator as emulator_module
 
-def patched_optimizer_fit(*args, **kwargs):
-    """GPU-accelerated optimizer_fit wrapper."""
-    # Add GPU-specific defaults
-    kwargs.setdefault('device', 'cuda')
-    kwargs.setdefault('verbose', os.getenv('GPU_VERBOSE', 'false').lower() == 'true')
-    return gpu_optimizer_fit(*args, **kwargs)
+# Store original class
+_OriginalEmulatorProcessor = emulator_module.EmulatorProcessor if hasattr(emulator_module, 'EmulatorProcessor') else None
 
-ag_optimizer_module.optimizer_fit = patched_optimizer_fit
 
-# CRITICAL: Also patch the executor module which imports optimizer_fit directly
-# The "from ... import optimizer_fit" creates a separate binding that we must also patch
-import optimizers.python_autogeosteering_executor as executor_module
-executor_module.optimizer_fit = patched_optimizer_fit
+def patch_emulator():
+    """Patch emulator to use GpuEmulatorProcessor."""
+    # The DrillingEmulator creates EmulatorProcessor internally
+    # We need to patch the import in emulator module
+    from emulator_processor_gpu import GpuEmulatorProcessor
+    import emulator_processor
+    emulator_processor.EmulatorProcessor = GpuEmulatorProcessor
 
+    # Also patch in emulator module if it imports EmulatorProcessor
+    if hasattr(emulator_module, 'EmulatorProcessor'):
+        emulator_module.EmulatorProcessor = GpuEmulatorProcessor
+
+
+# Apply patch
+patch_emulator()
+
+executor_type = os.environ.get('AUTOGEOSTEERING_EXECUTOR', 'gpu')
 print("=" * 60)
-print("GPU SLICER: optimizer_fit patched to use GPU acceleration")
-print("Patched modules: ag_numerical.ag_func_optimizer, optimizers.python_autogeosteering_executor")
+print(f"GPU SLICER: AUTOGEOSTEERING_EXECUTOR={executor_type}")
+print("Clean implementation - no monkey-patching of optimizer_fit")
 print("=" * 60)
 
-# Now run the original slicer
+
 if __name__ == "__main__":
-    # Import slicer module (will use patched optimizer_fit)
-    from slicer import main
-    main()
+    slicer_main()

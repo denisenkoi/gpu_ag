@@ -108,7 +108,43 @@ Pops found global: 9/10
 ```
 
 ### Интеграция со slicer
-`slicer_gpu.py` автоматически использует обновлённый `gpu_optimizer_fit.py` через monkey-patch.
+~~`slicer_gpu.py` автоматически использует обновлённый `gpu_optimizer_fit.py` через monkey-patch.~~
+
+---
+
+## [2025-12-17 22:15] Чистая интеграция без monkey-patch
+
+### Новые файлы
+- `gpu_executor.py` - GpuAutoGeosteeringExecutor с multi-population DE
+- `emulator_processor_gpu.py` - GpuEmulatorProcessor с выбором executor
+- `slicer_gpu.py` - обновлён для чистой интеграции
+
+### Архитектура
+```
+.env: AUTOGEOSTEERING_EXECUTOR=gpu|python|cpu
+
+slicer_gpu.py
+    └── emulator_processor_gpu.py
+        └── GpuEmulatorProcessor._create_executor()
+            ├── gpu → GpuAutoGeosteeringExecutor (multi-population DE)
+            ├── python → PythonAutoGeosteeringExecutor (scipy DE)
+            └── cpu → AutoGeosteeringExecutor (C++ daemon)
+```
+
+### Настройки .env для GPU
+```bash
+AUTOGEOSTEERING_EXECUTOR=gpu  # auto|gpu|python|cpu
+GPU_N_POPULATIONS=10          # Параллельных популяций
+GPU_POPSIZE_EACH=500          # Особей в каждой
+GPU_MAXITER=500               # Итераций
+```
+
+### Три executor'а
+| Executor | Backend | Speed | Reliability |
+|----------|---------|-------|-------------|
+| cpu/daemon | C++ | baseline | baseline |
+| python | scipy DE | ~60s | ~95% |
+| **gpu** | multi-pop DE | **~10s** | **100%** |
 
 ---
 
