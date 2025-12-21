@@ -12,6 +12,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from emulator import DrillingEmulator
+from path_utils import get_env_path
 # from quality_checker import InterpretationQualityChecker
 
 
@@ -63,8 +64,8 @@ def load_configuration() -> dict:
         'landing_perch_min_angle_deg': float(os.getenv('LANDING_PERCH_MIN_ANGLE_DEG', '30.0')),
         'landing_perch_stability_window': int(os.getenv('LANDING_PERCH_STABILITY_WINDOW', '5')),
 
-        # StarSteer directory for interpretation export
-        'starsteer_dir': os.getenv('STARSTEER_DIR', ''),
+        # StarSteer directory for interpretation export (auto-converted for platform)
+        'starsteer_dir': get_env_path('STARSTEER_DIR', ''),
     }
 
     return config

@@ -106,13 +106,28 @@ class StarSteerSlicerOrchestrator:
         # Slice ID counter for duplicate detection (STARSTEER slice_id)
         self.slice_id_counter = 0
 
+        # Debug mode - skip StarSteer init, assume AG already running
+        self.debug_mode = os.getenv('SLICER_DEBUG_MODE', 'false').lower() == 'true'
+        if self.debug_mode:
+            logger.info("=" * 70)
+            logger.info("DEBUG MODE ENABLED - skipping StarSteer init")
+            logger.info("=" * 70)
+
     def _setup_paths(self):
         """Setup StarSteer paths.
 
         Priority: CLI argument > DEFAULT_SLICER_STARSTEER_DIR
         """
-        # Use CLI argument if provided, otherwise default
-        starsteer_path = _CLI_CONFIG.get('starsteer_dir') or DEFAULT_SLICER_STARSTEER_DIR
+        from path_utils import normalize_path
+
+        # ONLY CLI argument, no fallback!
+        starsteer_path = _CLI_CONFIG.get('starsteer_dir')
+        if not starsteer_path:
+            raise ValueError("--starsteer-dir is required!")
+
+        # Auto-convert path for current platform (Windows <-> WSL)
+        starsteer_path = normalize_path(starsteer_path)
+
         self.starsteer_dir = Path(starsteer_path)
 
         logger.info(f"StarSteer directory: {self.starsteer_dir}")
@@ -139,22 +154,27 @@ class StarSteerSlicerOrchestrator:
 
         Phase 2 (ME-11) will add slicing loop
         """
-        # Wait for stale StarSteer heartbeats to expire (status.json older than 30s)
-        logger.info("Waiting 40s for stale heartbeats to expire...")
-        time.sleep(40)
+        if not self.debug_mode:
+            # Ensure ALL StarSteer instances are closed before starting
+            # This prevents race conditions when multiple StarSteer are running
+            self._ensure_all_starsteer_closed()
 
-        logger.info("=" * 70)
-        logger.info("StarSteer Slicer Orchestrator - Phase 1: INIT")
-        logger.info("=" * 70)
+            logger.info("=" * 70)
+            logger.info("StarSteer Slicer Orchestrator - Phase 1: INIT")
+            logger.info("=" * 70)
 
-        # Cleanup previous run artifacts
-        self._cleanup_previous_run()
+            # Cleanup previous run artifacts (files only, StarSteer already closed)
+            self._cleanup_previous_run(cleanup_starsteer=False)
 
-        # Ensure StarSteer running
-        self._ensure_starsteer_running()
+            # Ensure StarSteer running
+            self._ensure_starsteer_running()
 
-        # Ensure project loaded
-        self._ensure_project_loaded()
+            # Ensure project loaded
+            self._ensure_project_loaded()
+        else:
+            logger.info("=" * 70)
+            logger.info("DEBUG MODE - StarSteer init skipped, AG assumed running")
+            logger.info("=" * 70)
 
         # Step 1: Load wells config (process=true only)
         logger.info("Loading wells configuration...")
@@ -195,13 +215,116 @@ class StarSteerSlicerOrchestrator:
     # Cleanup Methods
     # ========================================================================
 
-    def _cleanup_previous_run(self):
+    def _ensure_all_starsteer_closed(self, max_retries: int = 5, stale_timeout: int = 35):
+        """
+        Ensure ALL StarSteer instances are closed before starting.
+
+        Prevents race conditions when multiple StarSteer are running.
+        Uses retry loop: send CLOSE_APP, wait for status.json to become stale (>30s).
+
+        Args:
+            max_retries: Maximum CLOSE_APP attempts
+            stale_timeout: Seconds to wait for status.json to become stale
+        """
+        logger.info("Ensuring all StarSteer instances are closed...")
+
+        for attempt in range(max_retries):
+            # Check if status.json is stale (no updates for 30+ seconds)
+            if not self.status_file.exists():
+                logger.info("  ✓ No status.json - no StarSteer running")
+                # Clean commands.json just in case
+                if self.commands_file.exists():
+                    self.commands_file.unlink()
+                    logger.info("  ✓ Cleared stale commands.json")
+                return
+
+            mtime = self.status_file.stat().st_mtime
+            age_seconds = time.time() - mtime
+
+            if age_seconds >= 30:
+                # Double-check: wait a bit and verify still stale
+                logger.info(f"  status.json is stale ({age_seconds:.0f}s old), verifying...")
+                time.sleep(5)
+
+                new_mtime = self.status_file.stat().st_mtime
+                if new_mtime == mtime:
+                    logger.info("  ✓ Confirmed: no active StarSteer (status.json unchanged)")
+                    # Clean commands.json just in case
+                    if self.commands_file.exists():
+                        self.commands_file.unlink()
+                        logger.info("  ✓ Cleared stale commands.json")
+                    return
+                else:
+                    logger.info("  status.json was updated during verification, retrying...")
+                    continue
+
+            # StarSteer is running - send CLOSE_APP
+            logger.info(f"  StarSteer detected (status.json {age_seconds:.0f}s old), sending CLOSE_APP... (attempt {attempt + 1}/{max_retries})")
+
+            # Write CLOSE_APP command
+            command_data = {
+                "command": "CLOSE_APP",
+                "params": {"save_changes": False}
+            }
+            with open(self.commands_file, 'w', encoding='utf-8') as f:
+                json.dump(command_data, f, indent=2)
+
+            # Wait for status.json to become stale (StarSteer stopped updating)
+            wait_start = time.time()
+            last_mtime = mtime
+
+            while time.time() - wait_start < stale_timeout:
+                time.sleep(3)
+
+                if not self.status_file.exists():
+                    logger.info("  ✓ status.json deleted - StarSteer closed")
+                    # Clean commands.json to prevent new StarSteer from reading stale CLOSE_APP
+                    if self.commands_file.exists():
+                        self.commands_file.unlink()
+                        logger.info("  ✓ Cleared commands.json (prevent race condition)")
+                    return
+
+                current_mtime = self.status_file.stat().st_mtime
+                current_age = time.time() - current_mtime
+
+                if current_age >= 30:
+                    logger.info(f"  ✓ status.json stale ({current_age:.0f}s) - StarSteer closed")
+                    # Clean commands.json to prevent new StarSteer from reading stale CLOSE_APP
+                    if self.commands_file.exists():
+                        self.commands_file.unlink()
+                        logger.info("  ✓ Cleared commands.json (prevent race condition)")
+                    # Extra wait to be safe
+                    time.sleep(5)
+                    return
+
+                if current_mtime != last_mtime:
+                    logger.info(f"    status.json updated ({current_age:.0f}s ago), waiting...")
+                    last_mtime = current_mtime
+
+            logger.warning(f"  CLOSE_APP attempt {attempt + 1} did not fully close StarSteer, retrying...")
+
+        # After all retries, check final state
+        if self.status_file.exists():
+            final_age = time.time() - self.status_file.stat().st_mtime
+            if final_age < 30:
+                raise RuntimeError(
+                    f"Failed to close all StarSteer instances after {max_retries} attempts. "
+                    f"status.json still fresh ({final_age:.0f}s). "
+                    "Please close StarSteer manually."
+                )
+
+        logger.info("  ✓ All StarSteer instances closed")
+
+    def _cleanup_previous_run(self, cleanup_starsteer: bool = True):
         """
         Cleanup artifacts from previous slicer runs.
 
         Clears:
         - json_comparison directory (raw/step files)
         - Commands log file (starsteer_commands.jsonl)
+
+        Args:
+            cleanup_starsteer: If True, also close StarSteer (default True for backward compat)
         """
         import shutil
 
@@ -229,7 +352,8 @@ class StarSteerSlicerOrchestrator:
             logger.info(f"  Cleared {self.commands_log_file}")
 
         # 3. Close any running StarSteer instance (soft kill via CLOSE_APP)
-        self._close_starsteer_if_running()
+        if cleanup_starsteer:
+            self._close_starsteer_if_running()
 
         logger.info("Cleanup complete")
 
@@ -308,19 +432,18 @@ class StarSteerSlicerOrchestrator:
         import subprocess
         import platform
 
-        # StarSteer executable path
-        starsteer_exe = self.starsteer_dir / "StarSteer.exe"
-
-        if not starsteer_exe.exists():
-            raise FileNotFoundError(f"StarSteer.exe not found: {starsteer_exe}")
-
-        logger.info(f"Launching StarSteer: {starsteer_exe}")
-
         # Check if running on Linux (WSL) - use trigger system
         if platform.system() == 'Linux':
+            logger.info(f"WSL detected - launching StarSteer via trigger")
             self._launch_starsteer_via_trigger()
         else:
             # Windows - direct launch
+            starsteer_exe = self.starsteer_dir / "StarSteer.exe"
+
+            if not starsteer_exe.exists():
+                raise FileNotFoundError(f"StarSteer.exe not found: {starsteer_exe}")
+
+            logger.info(f"Launching StarSteer: {starsteer_exe}")
             subprocess.Popen(
                 [str(starsteer_exe)],
                 cwd=str(self.starsteer_dir),
@@ -335,7 +458,8 @@ class StarSteerSlicerOrchestrator:
         import time as time_module
 
         # Trigger directory - use sc project task_queue
-        trigger_dir = Path("/mnt/e/Projects/Rogii/sc/task_queue")
+        from path_utils import normalize_path
+        trigger_dir = Path(normalize_path("E:/Projects/Rogii/sc/task_queue"))
         trigger_dir.mkdir(parents=True, exist_ok=True)
 
         # Create trigger file
@@ -347,7 +471,7 @@ class StarSteerSlicerOrchestrator:
             "task_id": task_id,
             "type": "run_bat",
             "script_path": "runss_slicer_de.bat",
-            "bot_id": "GPU_Slicer",
+            "bot_id": "SSAndAG",
             "created_at": timestamp
         }
 
@@ -640,45 +764,49 @@ class StarSteerSlicerOrchestrator:
             logger.info("=" * 70)
 
             try:
-                # Step 1: Get reference interpretation UUID (BEFORE INIT_WELL_SLICER)
-                # Must be done while still on source well!
-                logger.info("Step 1: Getting reference interpretation UUID from source well...")
-                ref_interp_uuid = self._get_reference_interpretation_uuid(source_uuid)
-                logger.info(f"✓ Reference UUID: {ref_interp_uuid}")
+                if not self.debug_mode:
+                    # Step 1: Get reference interpretation UUID (BEFORE INIT_WELL_SLICER)
+                    # Must be done while still on source well!
+                    logger.info("Step 1: Getting reference interpretation UUID from source well...")
+                    ref_interp_uuid = self._get_reference_interpretation_uuid(source_uuid)
+                    logger.info(f"✓ Reference UUID: {ref_interp_uuid}")
 
-                # Step 2: INIT_WELL_SLICER (creates target well and activates it)
-                logger.info("Step 2: Initializing well slicer...")
-                target_uuid, landing_end_md = self._init_well_slicer(source_uuid, TARGET_WELL_NAME)
-                logger.info(f"✓ Target well created and activated: {target_uuid}")
-                logger.info(f"✓ Landing end MD extracted: {landing_end_md:.2f}m")
+                    # Step 2: INIT_WELL_SLICER (creates target well and activates it)
+                    logger.info("Step 2: Initializing well slicer...")
+                    target_uuid, landing_end_md = self._init_well_slicer(source_uuid, TARGET_WELL_NAME)
+                    logger.info(f"✓ Target well created and activated: {target_uuid}")
+                    logger.info(f"✓ Landing end MD extracted: {landing_end_md:.2f}m")
 
-                # Step 3: Copy interpretation (starred → Assisted on target well)
-                logger.info("Step 3: Copying interpretation to target well...")
-                assisted_uuid = self._copy_interpretation_to_target()
-                logger.info(f"✓ Interpretation copied: Assisted UUID={assisted_uuid}")
+                    # Step 3: Copy interpretation (starred → Assisted on target well)
+                    logger.info("Step 3: Copying interpretation to target well...")
+                    assisted_uuid = self._copy_interpretation_to_target()
+                    logger.info(f"✓ Interpretation copied: Assisted UUID={assisted_uuid}")
 
-                # ========================================================================
-                # TESTING: SKIP AG CONFIGURATION but START AG
-                # ========================================================================
-                # Testing: Can AG start WITHOUT explicit configuration?
-                # SKIP: Configure AG config file and Configure AG settings
-                # KEEP: Start AG command
-                # ========================================================================
+                    # ========================================================================
+                    # TESTING: SKIP AG CONFIGURATION but START AG
+                    # ========================================================================
+                    # Testing: Can AG start WITHOUT explicit configuration?
+                    # SKIP: Configure AG config file and Configure AG settings
+                    # KEEP: Start AG command
+                    # ========================================================================
 
-                # Step 4: Configure AG config file (passive JSON write)
-                logger.info("Step 4: Configuring AG config file...")
-                self._configure_ag_config(TARGET_WELL_NAME, ref_interp_uuid)
+                    # Step 4: Configure AG config file (passive JSON write)
+                    logger.info("Step 4: Configuring AG config file...")
+                    self._configure_ag_config(TARGET_WELL_NAME, ref_interp_uuid)
 
-                # Step 5: Configure AG settings (triggers ag_config.json reload)
-                logger.info("Step 5: Configuring AG settings...")
-                self._configure_ag_settings(well_info, landing_end_md)
+                    # Step 5: Configure AG settings (triggers ag_config.json reload)
+                    logger.info("Step 5: Configuring AG settings...")
+                    self._configure_ag_settings(well_info, landing_end_md)
 
-                # Step 6: Start AG (with default settings)
-                # Note: AG start MD is configured in StarSteer, not passed as parameter
-                logger.info("Step 6: Starting AG with default settings...")
-                self._start_ag(TARGET_WELL_NAME)
+                    # Step 6: Start AG (with default settings)
+                    # Note: AG start MD is configured in StarSteer, not passed as parameter
+                    logger.info("Step 6: Starting AG with default settings...")
+                    self._start_ag(TARGET_WELL_NAME)
+                else:
+                    logger.info("DEBUG MODE - skipping StarSteer commands (steps 1-6)")
+                    logger.info("Assuming AG already running on slicing_well")
 
-                # Step 4: Load initial data
+                # Load initial data
                 initial_well_data = self._load_well_json(TARGET_WELL_NAME)
 
                 # Step 5: Night Guard INIT (via emulator)
@@ -688,10 +816,19 @@ class StarSteerSlicerOrchestrator:
                 logger.info(f"✓ Well prepared: {TARGET_WELL_NAME}")
                 logger.info(f"  Start MD: {setup_data['current_md']:.2f}m")
                 logger.info(f"  Max MD: {setup_data['max_md']:.2f}m")
-                logger.info(f"  Reference UUID: {ref_interp_uuid}")
+                if not self.debug_mode:
+                    logger.info(f"  Reference UUID: {ref_interp_uuid}")
 
-                # Run slicing loop
-                self._run_slicing_loop(setup_data, TARGET_WELL_NAME, source_name)
+                # Run slicing loop (skip in debug mode - only INIT)
+                if not self.debug_mode:
+                    self._run_slicing_loop(setup_data, TARGET_WELL_NAME, source_name)
+                else:
+                    logger.info("DEBUG MODE - skipping slicing loop, only INIT done")
+                    # Export interpretation to StarSteer after INIT
+                    emulator = setup_data['emulator']
+                    executor = setup_data['executor']
+                    emulator._export_interpretation_to_starsteer(TARGET_WELL_NAME, executor)
+                    logger.info("DEBUG MODE - exported interpretation to StarSteer")
 
                 # Cleanup AFTER loop
                 if setup_data.get('visualizer'):
@@ -971,6 +1108,86 @@ class StarSteerSlicerOrchestrator:
         logger.info(f"  landingInterpretation: manual")
         logger.info(f"  referenceInterpretation: {ref_interp_uuid}")
 
+    def _update_pseudo_log_end_md(self, well_name: str, current_md: float):
+        """
+        Update pseudoLogEndMd in ag_config.json for current step.
+
+        This value tells C++ AG where to cut off typeLog data to prevent
+        data leakage from interpretation zone.
+
+        Args:
+            well_name: Well name (key in ag_config.json)
+            current_md: Current MD in meters
+        """
+        lookback_distance = float(os.getenv('LOOKBACK_DISTANCE', '200.0'))
+        pseudo_log_end_md = current_md - lookback_distance
+
+        if pseudo_log_end_md <= 0:
+            return
+
+        ag_config_path = Path(self.starsteer_dir) / "ag_config.json"
+
+        # Read existing config
+        if ag_config_path.exists():
+            with open(ag_config_path, 'r', encoding='utf-8') as f:
+                config_data = json.load(f)
+        else:
+            config_data = {}
+
+        # Update pseudoLogEndMd for this well
+        if well_name not in config_data:
+            config_data[well_name] = {}
+        config_data[well_name]['pseudoLogEndMd'] = pseudo_log_end_md
+
+        # Write back
+        with open(ag_config_path, 'w', encoding='utf-8') as f:
+            json.dump(config_data, f, indent=2)
+
+        logger.debug(f"Updated pseudoLogEndMd: {pseudo_log_end_md:.2f}m (current_md={current_md:.2f} - lookback={lookback_distance})")
+
+    def _save_typelog_snapshot(self, well_data: Dict[str, Any], current_md: float):
+        """
+        Save typeLog snapshot to history file for comparing across STEP iterations.
+
+        Used to verify that pseudoLogEndMd affects typeLog data.
+
+        Args:
+            well_data: Well data dict containing typeLog
+            current_md: Current MD in meters
+        """
+        history_path = Path(self.starsteer_dir) / "typeLog_history.json"
+
+        # Load existing history
+        if history_path.exists():
+            with open(history_path, 'r', encoding='utf-8') as f:
+                history = json.load(f)
+        else:
+            history = {}
+
+        # Get typeLog points
+        typelog = well_data.get('typeLog', {})
+        points = typelog.get('tvdSortedPoints', [])
+
+        if not points:
+            logger.debug("No typeLog points to save")
+            return
+
+        # Create snapshot: count + first/last 5 points for comparison
+        snapshot = {
+            'points_count': len(points),
+            'md_range': [points[0].get('measuredDepth', 0), points[-1].get('measuredDepth', 0)] if points else [],
+            'first_5': points[:5],
+            'last_5': points[-5:] if len(points) >= 5 else points
+        }
+
+        # Save with MD as key
+        history[f"{current_md:.2f}"] = snapshot
+
+        with open(history_path, 'w', encoding='utf-8') as f:
+            json.dump(history, f, indent=2)
+
+        logger.info(f"Saved typeLog snapshot: MD={current_md:.2f}m, points={len(points)}")
+
     def _configure_ag_settings(self, well_config: Dict[str, Any], landing_end_md: float):
         """
         Send CONFIGURE_AG_SETTINGS command with parameters from well config and .env
@@ -1050,6 +1267,15 @@ class StarSteerSlicerOrchestrator:
             if grid_name_env:
                 ag_params["gridName"] = grid_name_env
                 logger.info(f"  gridName: {grid_name_env} (from .env)")
+
+        # Add pseudo_log_end_md to prevent data leakage
+        # TypeLog should not contain data from interpretation zone
+        lookback_distance = float(os.getenv('LOOKBACK_DISTANCE', '200.0'))
+        ag_start_md = ag_params.get("agStartMD", landing_end_md)
+        pseudo_log_end_md = max(ag_start_md, landing_end_md) - lookback_distance
+        if pseudo_log_end_md > 0:
+            ag_params["pseudoLogEndMd"] = pseudo_log_end_md
+            logger.info(f"  pseudoLogEndMd: {pseudo_log_end_md:.2f}m (max(agStart, landing) - lookback)")
 
         # Send CONFIGURE_AG_SETTINGS command
         self._send_command("CONFIGURE_AG_SETTINGS", ag_params, timeout=60)
@@ -1322,6 +1548,9 @@ class StarSteerSlicerOrchestrator:
             # They should only be sent on INIT, not on every step.
             # Reference: emulator.py:858-865 (old slicer behavior)
             if 'typeLog' in updated_data:
+                # Save snapshot BEFORE removing (for pseudoLogEndMd verification)
+                step_current_md = max(p['measuredDepth'] for p in updated_data['well']['points'])
+                self._save_typelog_snapshot(updated_data, step_current_md)
                 del updated_data['typeLog']
                 logger.debug("Removed typeLog for step (prevents full recalc)")
             if 'tops' in updated_data:
@@ -1342,6 +1571,9 @@ class StarSteerSlicerOrchestrator:
             # 6.1. Save OUTPUT to comparison directory
             current_md_for_output = max(p['measuredDepth'] for p in updated_data['well']['points'])
             executor._copy_output_to_comparison_dir(interpretation_data, target_well_name, "step", current_md_for_output)
+
+            # 6.2. Update pseudoLogEndMd for this step (for future C++ use)
+            self._update_pseudo_log_end_md(target_well_name, current_md_for_output)
 
             # 6.5. QUALITY ANALYSIS: Compare StarSteer MANUAL vs Python interpretation
             if interpretation_data:
@@ -1607,7 +1839,10 @@ def main():
     if args.use_de:
         os.environ['PYTHON_EXECUTOR_ENABLED'] = 'true'
         _CLI_CONFIG['python_executor'] = True
-        _CLI_CONFIG['max_iterations'] = args.max_iterations if args.max_iterations else 1
+        # 0 means unlimited (use large number), None means default to 1
+        _CLI_CONFIG['max_iterations'] = args.max_iterations if args.max_iterations is not None else 1
+        if _CLI_CONFIG['max_iterations'] == 0:
+            _CLI_CONFIG['max_iterations'] = 10000  # effectively unlimited
         logger.info("=" * 60)
         logger.info("DE MODE: Python Differential Evolution optimizer")
         logger.info(f"  Max iterations: {_CLI_CONFIG['max_iterations']}")

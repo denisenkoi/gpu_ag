@@ -113,15 +113,12 @@ def create_segments_from_json(json_segments, well:Well, current_end_md=None):
     for i, json_segment in enumerate(json_segments):
         # Определяем следующий сегмент для расчета endMd
         next_segment = json_segments[i + 1] if i + 1 < len(json_segments) else None
-        print(json_segment, next_segment)
         # Создаем расширенный json_segment с endMd
         extended_json_segment = json_segment.copy()
 
         # Вычисляем endMd
         if next_segment and 'startMd' in next_segment:
             extended_json_segment['endMd'] = next_segment['startMd']
-
-            print(f"extended_json_segment: {extended_json_segment}, well_min_md = {well.min_md:.2f}, well_max_md = {well.max_md:.2f}")
 
             # Создаем сегмент - если он за пределами well, упадет с assertion
             segment = Segment(extended_json_segment, well=well)

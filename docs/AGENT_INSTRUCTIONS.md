@@ -2,63 +2,130 @@
 
 ## Project Goal
 
-Довести надёжность GPU DE оптимизации до ~100% сходимости при минимальном увеличении времени.
-
-**Предыдущая фаза (RND-777):** Достигнуто 95% успеха с zeros+noise init, 28x speedup vs CPU.
+GPU-ускоренная интерпретация скважины с использованием EvoTorch.
 
 ## Jira
 
 - Project: MDE (Multidrilling Emulator)
 - Epic: ME-20 (GPU Vectorized Optimization for Autogeosteering)
-- Предыдущая задача: RND-777
 
-## Текущее состояние
+## Текущее состояние (2025-12-19)
 
-### Достигнуто (RND-777)
-- GPU DE работает: **2.1 сек** на оптимизацию (vs CPU ~60 сек)
-- Speedup: **28x**
-- Надёжность: **95%** с zeros+noise init (19/20 успехов)
-- Параметры: popsize=500, maxiter=500, mutation=(0.5, 1.0), CR=0.7
+### ДОСТИГНУТО ✓
 
-### Проблема
-При многократных запусках (production) 5% провалов недопустимо.
-Нужно довести до ~100% без значительного увеличения времени.
+1. **EvoTorch SNES работает**
+   - 5 restarts × 200 iter × 100 pop
+   - ~5 сек на шаг
+   - fun ~0.1-0.3 (хорошо!)
 
-### Ключевое наблюдение
-**GPU недоиспользуется!**
-- RTX 5090: 32GB, тысячи CUDA cores
-- Текущий batch: 500 особей × 3 параметра = 1500 чисел
-- Это <1% возможностей GPU
-- Можно запустить 5-15 популяций параллельно почти без увеличения времени
+2. **Итеративная интерпретация работает**
+   - `optimize_step()` - один шаг оптимизации
+   - `update_slicing_well()` - обновление файла (standalone режим)
+   - Шаг 30м, lookback 200м
+   - Success rate: ~83% (5/6 итераций)
 
-## План исследований
+3. **Сшивка сегментов работает**
+   - Truncation at lookback point
+   - Interpolation of stitch_shift
+   - frozen_md защищает начальную часть
 
-### Шаг 1: Multi-population (3-15 штук одновременно) ✅ COMPLETED
-- Запустить N независимых популяций в одном batch
-- Измерить время для N = 3, 5, 10, 15
-- Измерить успешность (должна быть ~100% при N≥3)
-- **Результат: N=10, 50 runs → 100% success, ~10 sec/run**
-- Файлы: `test_multi_de_scaling.py`, `test_multi_de_reliability.py`
+### Рабочие файлы
+| Файл | Описание |
+|------|----------|
+| `test_gpu_de_correct.py` | Итеративный тест с EvoTorch SNES |
+| `torch_funcs/batch_objective.py` | Batch objective function |
+| `torch_funcs/converters.py` | Конвертеры данных |
+| `cpu_baseline/` | Reference implementation (DO NOT TOUCH) |
 
-### Шаг 2: Паттерная инициализация
-- Вместо zeros для всех - разные стартовые гипотезы:
-  - zeros + noise (нейтраль)
-  - линейный тренд +2° (наклон вниз)
-  - линейный тренд -2° (наклон вверх)
-  - выпуклая дуга (прогиб вниз)
-  - вогнутая дуга (прогиб вверх)
-- Как фильтры в CNN - покрывают разные формы траектории
-- Файл: `test_pattern_init.py`
+### Запуск
+```bash
+python test_gpu_de_correct.py           # 1 итерация
+python test_gpu_de_correct.py -n 5      # 5 итераций
+python test_gpu_de_correct.py -n 0      # до конца скважины
+python test_gpu_de_correct.py --no-standalone  # без обновления slicing_well
+```
 
-### Шаг 3: Monte Carlo инициализация
-- Много маленьких вбросов по пространству параметров
-- Быстрая проверка разных регионов
-- Файл: `test_monte_carlo_init.py`
+## Реализовано (2025-12-20)
 
-### Шаг 4: Последовательная интерпретация всей скважины
-- Протестировать на полной скважине (не только 4 сегмента)
-- Проверить масштабируемость
-- Файл: `test_full_well.py`
+### 1. GPU Executor с EvoTorch SNES ✓
+- Создан `gpu_executor.py` для интеграции со slicer_gpu.py
+- EvoTorch SNES вместо scipy DE
+- Параметры: `GPU_N_RESTARTS=5`, `GPU_POPSIZE=100`, `GPU_MAXITER=200`
+
+### 2. Поддержка PseudoTypeLog ✓
+- Параметр `USE_PSEUDOTYPELOG=false` в .env
+- При true: typeLog → pseudoTypeLog, tvdTypewellShift = 0
+
+### 3. Предотвращение утечки данных ✓
+- `pseudoLogEndMd` в ag_params (INIT)
+- `_update_pseudo_log_end_md()` обновляет ag_config.json (STEP)
+- Формула: `pseudo_log_end_md = current_md - lookback`
+
+### Jira: RND-765
+
+## СЛЕДУЮЩИЙ ЭТАП: Тестирование pseudoLogEndMd
+
+### Задача
+Проверить что pseudoLogEndMd влияет на данные typeLog при каждом STEP.
+
+### План
+1. **Модифицировать код**: при каждом STEP записывать typeLog snapshot в JSON
+   - Файл: `typeLog_history.json`
+   - Формат: `{MD: [typeLog_points_sample], ...}`
+   - Записывать первые/последние N точек для сравнения
+
+2. **Запустить тест**: slicer_gpu.py на Well1798~EGFDL
+
+3. **Анализ**: сравнить typeLog snapshots
+   - Если они все чуть-чуть разные → pseudoLogEndMd работает
+   - Если одинаковые → C++ пока не использует этот параметр
+
+4. **Сравнение с reference**: проверить качество интерпретации
+
+### Ключевые файлы
+- `gpu_executor.py` — GPU executor с EvoTorch SNES
+- `slicer.py` — pseudoLogEndMd (INIT + STEP)
+- `ag_config.json` — хранит pseudoLogEndMd для каждого STEP
+
+### Параметры
+- `tvdTypewellShift`: 21.56м (typeLog) / 0 (pseudoTypeLog)
+- `LOOKBACK_DISTANCE`: 200м
+- Well: Well1798~EGFDL, startMd: 3718.56м = 12200ft
+
+## КРИТИЧЕСКИЕ ПРАВИЛА
+
+### 1. НИКОГДА НЕ ПИСАТЬ САМОПИСНЫЕ ОПТИМИЗАТОРЫ!
+**ВСЕГДА использовать коробочные решения:**
+- EvoTorch (SNES, XNES, CMAES, CEM)
+- scipy.optimize
+- optuna
+
+Самописный DE был удалён 2025-12-18 после многочисленных проблем.
+
+### 2. cpu_baseline/ - НЕ ТРОГАТЬ
+Это reference implementation. Любые изменения только после согласования.
+
+### 3. Результаты в worksheet.md
+Все эксперименты и их результаты записывать в `docs/worksheet.md`.
+
+## Data Sources
+
+```
+/mnt/e/Projects/Rogii/ss/2025_3_release_dynamic_CUSTOM_instances/slicer_de/
+├── AG_DATA/InitialData/slicing_well.json   # Well + TypeWell + interpretations (READ)
+└── interpretation.json                      # Output for StarSteer (WRITE ONLY!)
+```
+
+### КРИТИЧНО: interpretation.json = WRITE ONLY
+**НИКОГДА не читать из interpretation.json!**
+- Этот файл перезаписывается GPU output'ом
+- Всегда читать интерпретацию из `slicing_well.json`
+- В standalone режиме (тесты) обновляем `slicing_well.json` после каждого шага
+
+### Ключевые поля в slicing_well.json
+- `autoGeosteeringParameters.startMd` - начало оптимизации
+- `interpretation.segments` - ручная интерпретация
+- `starredInterpretation.segments` - reference для сравнения
 
 ## Запуск из WSL
 
@@ -66,65 +133,14 @@
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate vllm
 cd /mnt/e/Projects/Rogii/gpu_ag
-python <test_script>.py
+python test_gpu_de_correct.py
 ```
 
-## Существующие скрипты
+## EvoTorch алгоритмы
 
-| Файл | Описание |
-|------|----------|
-| `test_stability.py` | Тест 20 запусков LHS vs zeros init |
-| `test_gpu_de.py` | Базовый тест GPU DE |
-| `test_cpu_vs_gpu_eval.py` | Сравнение CPU и GPU objective function |
-| `test_full_cpu_de.py` | CPU scipy DE для сравнения |
-| `gpu_optimizer_fit.py` | Drop-in replacement для CPU optimizer_fit |
-| `torch_funcs/gpu_optimizer.py` | GPU DE implementation |
-| `torch_funcs/batch_objective.py` | Batch objective function |
-
-## Data Sources
-
-```
-/mnt/e/Projects/Rogii/ss/2025_3_release_dynamic_CUSTOM_instances/slicer_de/
-├── AG_DATA/InitialData/slicing_well.json   # Well + TypeWell данные
-└── interpretation.json                      # Сегменты интерпретации
-```
-
-## Ключевые параметры DE (scipy defaults - работают!)
-
-```python
-mutation = (0.5, 1.0)   # dithered F
-recombination = 0.7     # CR
-popsize = 500
-maxiter = 500
-```
-
-## Reference из RND-777
-
-### Результаты теста стабильности (20 запусков)
-
-| Init Method | Success | Mean fun | Time/run |
-|-------------|---------|----------|----------|
-| LHS (500x500) | 4/20 (20%) | ~0.35 | ~2.1s |
-| **Zeros+noise** | **19/20 (95%)** | ~0.18 | ~2.1s |
-| LHS (1000x1000) | 10/20 (50%) | ~0.27 | ~8.4s |
-
-### Zeros+noise init код
-```python
-center = torch.zeros(D, device=device, dtype=dtype)
-noise_scale = bound_range * 0.01  # 1% от диапазона
-population = center + torch.randn(popsize, D) * noise_scale
-population = torch.clamp(population, lb, ub)
-```
-
-### Математика multi-population
-При 95% успеха одного запуска:
-- 2 популяции: 1 - 0.05² = 99.75%
-- 3 популяции: 1 - 0.05³ = 99.99%
-- 5 популяций: 1 - 0.05⁵ = 99.99997%
-
-## Development Rules
-
-1. **cpu_baseline/** - DO NOT TOUCH, reference
-2. Все тесты в корне gpu_ag/
-3. Comments in code: English only
-4. Результаты записывать в worksheet.md
+| Алгоритм | Описание |
+|----------|----------|
+| **SNES** | Separable NES (используем) |
+| **XNES** | Exponential NES |
+| **CMAES** | CMA-ES (золотой стандарт) |
+| **CEM** | Cross-Entropy Method |

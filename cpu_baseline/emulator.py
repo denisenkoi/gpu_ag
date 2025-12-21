@@ -131,9 +131,14 @@ class DrillingEmulator:
         # Initialize PAPI components based on mode
         if self.mode == 'nightguard':
             # Read well name from StarSteer status.json
-            starsteer_dir = Path(os.getenv('STARSTEER_DIR', ''))
-            if not starsteer_dir:
-                raise ValueError("STARSTEER_DIR not set in .env for nightguard mode")
+            # Priority: config['starsteer_dir'] > STARSTEER_DIR env var
+            from path_utils import normalize_path
+            starsteer_dir_str = config.get('starsteer_dir') or os.getenv('STARSTEER_DIR', '')
+            if not starsteer_dir_str:
+                raise ValueError("STARSTEER_DIR not set in .env or config for nightguard mode")
+
+            # Auto-convert path for current platform (Windows <-> WSL)
+            starsteer_dir = Path(normalize_path(starsteer_dir_str))
 
             status_json_path = starsteer_dir / 'status.json'
             if not status_json_path.exists():
@@ -650,12 +655,16 @@ class DrillingEmulator:
 
         if data_source == 'starsteer':
             # StarSteer mode: read JSON from {STARSTEER_DIR}/{WELLS_DATA_SUBDIR}/{well_name}.json
-            starsteer_dir = Path(os.getenv('STARSTEER_DIR', ''))
+            from path_utils import normalize_path
+            starsteer_dir_str = self.config.get('starsteer_dir') or os.getenv('STARSTEER_DIR', '')
             wells_data_subdir = os.getenv('WELLS_DATA_SUBDIR', 'AG_DATA/InitialData')
 
-            if not starsteer_dir:
-                logger.error("STARSTEER_DIR not set in .env for StarSteer mode")
+            if not starsteer_dir_str:
+                logger.error("STARSTEER_DIR not set in .env or config for StarSteer mode")
                 return False
+
+            # Auto-convert path for current platform (Windows <-> WSL)
+            starsteer_dir = Path(normalize_path(starsteer_dir_str))
 
             # Read well name from status.json
             status_json_path = starsteer_dir / 'status.json'
@@ -1317,14 +1326,16 @@ class DrillingEmulator:
         """
         try:
             # Get StarSteer dir from config (passed from caller: slicer.py, main.py)
+            from path_utils import normalize_path
             starsteer_dir = self.config.get('starsteer_dir', '')
             if not starsteer_dir:
                 logger.debug("starsteer_dir not in config - skipping interpretation export")
                 return
 
-            starsteer_path = Path(starsteer_dir)
+            # Auto-convert path for current platform (Windows <-> WSL)
+            starsteer_path = Path(normalize_path(starsteer_dir))
             if not starsteer_path.exists():
-                logger.warning(f"STARSTEER_DIR does not exist: {starsteer_dir} - skipping export")
+                logger.warning(f"STARSTEER_DIR does not exist: {starsteer_path} - skipping export")
                 return
 
             # Get source interpretation file from executor
