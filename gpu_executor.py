@@ -46,6 +46,93 @@ from evotorch.algorithms import SNES
 
 logger = logging.getLogger(__name__)
 
+# Normalization coefficient from MDE for Well1798~EGFDL
+# In MDE: well_GR × 1.446594 → normalized
+# Here: typeLog_GR / 1.446594 to match normalized well
+MDE_MULTIPLIER = 1.446594
+TYPELOG_NORM_COEF = 1.0 / MDE_MULTIPLIER  # ≈ 0.691
+
+
+def extend_pseudo_with_typelog(pseudo_log: Dict, type_log: Dict) -> Dict:
+    """
+    Extend pseudoTypeLog with interpolated points from typeLog.
+
+    - Takes points from typeLog where TVD > max(pseudo.TVD)
+    - Interpolates to pseudo's step size (0.03048m)
+    - Normalizes data by TYPELOG_NORM_COEF
+    """
+    pseudo_points = pseudo_log['tvdSortedPoints']
+    type_points = type_log['tvdSortedPoints']
+
+    if not pseudo_points or not type_points:
+        return pseudo_log
+
+    # Get TVD ranges
+    pseudo_max_tvd = pseudo_points[-1]['trueVerticalDepth']
+    type_max_tvd = type_points[-1]['trueVerticalDepth']
+
+    if type_max_tvd <= pseudo_max_tvd:
+        logger.info(f"typeLog TVD ({type_max_tvd:.1f}) <= pseudo TVD ({pseudo_max_tvd:.1f}), no extension needed")
+        return pseudo_log
+
+    # Calculate pseudo step
+    pseudo_step = pseudo_points[1]['trueVerticalDepth'] - pseudo_points[0]['trueVerticalDepth']
+
+    # Build typeLog interpolation arrays (only points after pseudo range)
+    type_tvd = []
+    type_data = []
+    for p in type_points:
+        tvd = p['trueVerticalDepth']
+        if tvd >= pseudo_max_tvd - pseudo_step:  # Include overlap for interpolation
+            type_tvd.append(tvd)
+            type_data.append(p['data'])
+
+    if len(type_tvd) < 2:
+        logger.warning("Not enough typeLog points for interpolation")
+        return pseudo_log
+
+    type_tvd = np.array(type_tvd)
+    type_data = np.array(type_data)
+
+    # Create new TVD grid from pseudo_max_tvd to type_max_tvd with pseudo step
+    new_tvd_grid = np.arange(pseudo_max_tvd + pseudo_step, type_max_tvd + pseudo_step/2, pseudo_step)
+
+    # Interpolate typeLog data to new grid
+    new_data = np.interp(new_tvd_grid, type_tvd, type_data)
+
+    # Normalize
+    new_data = new_data * TYPELOG_NORM_COEF
+
+    # Create new points
+    new_points = []
+    for tvd, data in zip(new_tvd_grid, new_data):
+        new_points.append({
+            'data': float(data),
+            'measuredDepth': float(tvd),  # Approximation: TVD ≈ MD in horizontal section
+            'trueVerticalDepth': float(tvd)
+        })
+
+    # Also need to extend 'points' array (MD-based)
+    pseudo_points_md = pseudo_log['points']
+    new_points_md = []
+    for tvd, data in zip(new_tvd_grid, new_data):
+        new_points_md.append({
+            'data': float(data),
+            'measuredDepth': float(tvd)
+        })
+
+    # Create extended pseudo log
+    extended_pseudo = {
+        'points': pseudo_points_md + new_points_md,
+        'tvdSortedPoints': pseudo_points + new_points,
+        'uuid': pseudo_log.get('uuid', '')
+    }
+
+    logger.info(f"Extended pseudoTypeLog: {len(pseudo_points)} -> {len(extended_pseudo['tvdSortedPoints'])} points, "
+                f"TVD {pseudo_max_tvd:.1f} -> {new_tvd_grid[-1]:.1f}m, norm_coef={TYPELOG_NORM_COEF:.3f}")
+
+    return extended_pseudo
+
 
 class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
     """GPU-accelerated AutoGeosteering executor using EvoTorch SNES
@@ -130,11 +217,16 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         self.optimization_logger.print_statistics()
 
     def _create_typewell(self, well_data: Dict[str, Any]) -> TypeWell:
-        """Create TypeWell, optionally using pseudoTypeLog"""
+        """Create TypeWell, optionally using extended pseudoTypeLog"""
         if self.use_pseudo_typelog and 'pseudoTypeLog' in well_data:
-            logger.info("Using pseudoTypeLog instead of typeLog (tvdTypewellShift=0)")
+            logger.info("Using extended pseudoTypeLog (tvdTypewellShift=0)")
             well_data_for_typewell = dict(well_data)
-            well_data_for_typewell['typeLog'] = well_data['pseudoTypeLog']
+            # Extend pseudoTypeLog with normalized typeLog points
+            extended_pseudo = extend_pseudo_with_typelog(
+                well_data['pseudoTypeLog'],
+                well_data['typeLog']
+            )
+            well_data_for_typewell['typeLog'] = extended_pseudo
             return TypeWell(well_data_for_typewell)
         else:
             if self.use_pseudo_typelog:
