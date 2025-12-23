@@ -334,6 +334,8 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.algorithm = os.getenv('GPU_ALGORITHM', 'SNES').upper()  # SNES, DE, or CMAES
         self.angle_grid_step = float(os.getenv('GPU_ANGLE_GRID_STEP', '1.0'))  # Angle grid step for center generation (degrees)
+        self.cmaes_mode = os.getenv('GPU_CMAES_MODE', 'multi').lower()  # 'single' or 'multi'
+        self.single_popsize = int(os.getenv('GPU_SINGLE_POPSIZE', '500'))  # popsize for single mode
 
         # PseudoTypeLog support
         self.use_pseudo_typelog = os.getenv('USE_PSEUDOTYPELOG', 'false').lower() == 'true'
@@ -355,6 +357,7 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         Path(self.interpretation_dir).mkdir(parents=True, exist_ok=True)
 
         logger.info(f"GPU executor initialized: device={self.device}, algorithm={self.algorithm}, "
+                    f"cmaes_mode={self.cmaes_mode}, single_popsize={self.single_popsize}, "
                     f"restarts={self.n_restarts}, popsize={self.popsize}, maxiter={self.maxiter}, "
                     f"use_pseudo={self.use_pseudo_typelog}")
 
@@ -609,24 +612,33 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
             best_overall_x = torch.tensor(result.x, dtype=torch.float64, device=self.device)
 
         elif self.algorithm == 'CMAES':
-            # CMA-ES with multi-population from generated centers
-            centers = generate_population_centers(K, self.angle_range, self.angle_grid_step)
-            self.last_num_populations = len(centers)
-            total_evals = len(centers) * self.popsize * self.maxiter
-            logger.info(f"CMAES: {len(centers)} populations, popsize={self.popsize}, maxiter={self.maxiter}, total_evals={total_evals}")
+            if self.cmaes_mode == 'single':
+                # Single large CMA-ES with uniform initialization
+                self.last_num_populations = 1
+                total_evals = self.single_popsize * self.maxiter
+                logger.info(f"CMAES single: popsize={self.single_popsize}, maxiter={self.maxiter}, total_evals={total_evals}")
 
-            for i, center_angles in enumerate(centers):
-                # Convert angles to shifts
-                center_shifts = center_angles / self.angle_range * (ub - lb) / 2 + (ub + lb) / 2
-                center_shifts = np.clip(center_shifts, lb, ub)
-                center_init = torch.tensor(center_shifts, dtype=torch.float64, device=self.device)
+                # Create problem with bounds for uniform initialization
+                class AGProblemBounded(Problem):
+                    def __init__(inner_self):
+                        super().__init__(
+                            objective_sense="min",
+                            solution_length=K,
+                            initial_bounds=(lb, ub),  # Uniform init within bounds
+                            dtype=torch.float64,
+                            device=self.device
+                        )
 
-                problem = AGProblem()
+                    def _evaluate_batch(inner_self, solutions):
+                        x = solutions.values
+                        fitness = wrapper(x)
+                        solutions.set_evals(fitness)
+
+                problem = AGProblemBounded()
                 searcher = CMAES(
                     problem,
                     stdev_init=stdev_init,
-                    popsize=self.popsize,
-                    center_init=center_init
+                    popsize=self.single_popsize
                 )
 
                 for _ in range(self.maxiter):
@@ -637,15 +649,51 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                     valid_mask = ~torch.isinf(pop.evals)
                     if valid_mask.any():
                         best_idx = pop.evals.argmin()
-                        best_fun = pop.evals[best_idx].item()
-                        best_x = pop.values[best_idx]
-                        if best_fun < best_overall_fun:
-                            best_overall_fun = best_fun
-                            best_overall_x = best_x.clone()
+                        best_overall_fun = pop.evals[best_idx].item()
+                        best_overall_x = pop.values[best_idx].clone()
 
-            if best_overall_x is None:
-                best_overall_x = torch.tensor((lb + ub) / 2, dtype=torch.float64, device=self.device)
-                best_overall_fun = wrapper(best_overall_x.unsqueeze(0)).item()
+                if best_overall_x is None:
+                    best_overall_x = torch.tensor((lb + ub) / 2, dtype=torch.float64, device=self.device)
+                    best_overall_fun = wrapper(best_overall_x.unsqueeze(0)).item()
+
+            else:
+                # CMA-ES with multi-population from generated centers (original approach)
+                centers = generate_population_centers(K, self.angle_range, self.angle_grid_step)
+                self.last_num_populations = len(centers)
+                total_evals = len(centers) * self.popsize * self.maxiter
+                logger.info(f"CMAES multi: {len(centers)} populations, popsize={self.popsize}, maxiter={self.maxiter}, total_evals={total_evals}")
+
+                for i, center_angles in enumerate(centers):
+                    # Convert angles to shifts
+                    center_shifts = center_angles / self.angle_range * (ub - lb) / 2 + (ub + lb) / 2
+                    center_shifts = np.clip(center_shifts, lb, ub)
+                    center_init = torch.tensor(center_shifts, dtype=torch.float64, device=self.device)
+
+                    problem = AGProblem()
+                    searcher = CMAES(
+                        problem,
+                        stdev_init=stdev_init,
+                        popsize=self.popsize,
+                        center_init=center_init
+                    )
+
+                    for _ in range(self.maxiter):
+                        searcher.step()
+
+                    pop = searcher.population
+                    if pop is not None and hasattr(pop, 'evals') and pop.evals is not None:
+                        valid_mask = ~torch.isinf(pop.evals)
+                        if valid_mask.any():
+                            best_idx = pop.evals.argmin()
+                            best_fun = pop.evals[best_idx].item()
+                            best_x = pop.values[best_idx]
+                            if best_fun < best_overall_fun:
+                                best_overall_fun = best_fun
+                                best_overall_x = best_x.clone()
+
+                if best_overall_x is None:
+                    best_overall_x = torch.tensor((lb + ub) / 2, dtype=torch.float64, device=self.device)
+                    best_overall_fun = wrapper(best_overall_x.unsqueeze(0)).item()
 
         else:  # SNES (default)
             for restart in range(self.n_restarts):
@@ -938,7 +986,10 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
 
         # Calculate expected evaluations for comparison
         if self.algorithm == 'CMAES':
-            expected_evals = self.last_num_populations * self.popsize * self.maxiter
+            if self.cmaes_mode == 'single':
+                expected_evals = self.single_popsize * self.maxiter
+            else:
+                expected_evals = self.last_num_populations * self.popsize * self.maxiter
         else:
             expected_evals = self.n_restarts * self.maxiter * self.popsize
 

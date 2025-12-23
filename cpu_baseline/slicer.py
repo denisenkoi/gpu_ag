@@ -1359,16 +1359,28 @@ class StarSteerSlicerOrchestrator:
             TimeoutError: If fresh file doesn't appear within timeout
         """
         data_file_path = self.ag_data_dir / f"{well_name}.json"
-        check_interval = 0.1  # Check every 0.1 second (StarSteer writes atomically)
+        check_interval = 0.5  # Check every 0.5 second
+        max_retries = 10  # Retry on race condition (atomic write: delete + rename)
 
         elapsed = 0
         while elapsed < timeout:
-            if data_file_path.exists():
-                file_mtime = data_file_path.stat().st_mtime
-
-                if file_mtime > start_time:
-                    logger.info(f"✓ Fresh data file detected (modified {file_mtime - start_time:.1f}s after AG start)")
-                    return
+            # Retry loop for race condition when StarSteer atomically rewrites file
+            for retry in range(max_retries):
+                try:
+                    if data_file_path.exists():
+                        file_mtime = data_file_path.stat().st_mtime
+                        if file_mtime > start_time:
+                            logger.info(f"✓ Fresh data file detected (modified {file_mtime - start_time:.1f}s after AG start)")
+                            return
+                    break  # File exists but not fresh yet, exit retry loop
+                except FileNotFoundError:
+                    # Race condition: file deleted during atomic write, retry
+                    if retry < max_retries - 1:
+                        logger.debug(f"Race condition on {well_name}.json, retry {retry + 1}/{max_retries}")
+                        time.sleep(0.5)
+                    else:
+                        logger.warning(f"Race condition persists after {max_retries} retries")
+                        break
 
             time.sleep(check_interval)
             elapsed += check_interval
