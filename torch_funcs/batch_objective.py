@@ -23,7 +23,8 @@ def batch_objective_function_torch(
     angle_range,
     angle_sum_power,
     min_pearson_value,
-    tvd_to_typewell_shift=0.0
+    tvd_to_typewell_shift=0.0,
+    prev_segment_angle=None
 ):
     """
     Batch objective function for DE optimization.
@@ -68,11 +69,26 @@ def batch_objective_function_torch(
     )
 
     # Angle sum penalty: (batch,)
+    # Includes angle difference with prev_segment (last frozen) if provided
     K = angles.shape[1]
     if K > 1:
-        angle_diffs = torch.abs(angles[:, 1:] - angles[:, :-1])
+        angle_diffs = torch.abs(angles[:, 1:] - angles[:, :-1])  # (batch, K-1)
+        n_diffs_base = angle_diffs.shape[1]  # Original count for normalization
+        if prev_segment_angle is not None:
+            # Add diff between prev_segment and first optimizing segment
+            first_diff = torch.abs(angles[:, 0] - prev_segment_angle)  # (batch,)
+            angle_diffs = torch.cat([first_diff.unsqueeze(1), angle_diffs], dim=1)  # (batch, K)
+        # Normalize to original scale: sum of original diffs + weighted extra diff
+        # This keeps backward compatibility while adding prev_segment influence
         angle_sum = torch.sum(angle_diffs, dim=1)
+        if prev_segment_angle is not None:
+            # Scale down to match original behavior: new_sum * (K-1)/K
+            angle_sum = angle_sum * (n_diffs_base / angle_diffs.shape[1])
         angle_sum_penalty = angle_sum ** angle_sum_power
+    elif K == 1 and prev_segment_angle is not None:
+        # Single segment but have prev_segment - penalize diff with it
+        angle_diffs = torch.abs(angles[:, 0] - prev_segment_angle)
+        angle_sum_penalty = angle_diffs ** angle_sum_power
     else:
         angle_sum_penalty = torch.zeros(batch_size, device=device, dtype=dtype)
 
@@ -147,6 +163,99 @@ def batch_objective_function_torch(
     return metrics
 
 
+def compute_detailed_metrics_torch(
+    shifts,
+    well_data,
+    typewell_data,
+    segments_torch,
+    pearson_power,
+    mse_power,
+    angle_range,
+    angle_sum_power,
+    tvd_to_typewell_shift=0.0,
+    prev_segment_angle=None
+):
+    """
+    Compute detailed metrics for a single shift configuration.
+    Returns dict with all components: pearson, mse, angles, penalties, objective.
+    """
+    device = shifts.device
+    dtype = shifts.dtype
+
+    # Ensure batch dimension
+    if shifts.dim() == 1:
+        shifts = shifts.unsqueeze(0)
+
+    from .converters import update_segments_with_shifts_torch, calc_segment_angles_torch
+    from .projection import calc_horizontal_projection_batch_torch
+    from .correlations import pearson_batch_torch, mse_batch_torch
+
+    # Update segments
+    segments_batch = update_segments_with_shifts_torch(shifts, segments_torch)
+
+    # Calculate angles
+    angles = calc_segment_angles_torch(segments_batch)
+    angles_deg = angles[0].cpu().numpy()  # First (only) batch item
+
+    # Angle penalty
+    angle_excess = torch.abs(angles) - angle_range
+    angle_penalty = torch.sum(
+        torch.where(angle_excess > 0, 1000 * angle_excess ** 2, torch.zeros_like(angle_excess)),
+        dim=1
+    )
+
+    # Angle sum penalty
+    K = angles.shape[1]
+    if K > 1:
+        angle_diffs = torch.abs(angles[:, 1:] - angles[:, :-1])
+        n_diffs_base = angle_diffs.shape[1]
+        if prev_segment_angle is not None:
+            first_diff = torch.abs(angles[:, 0] - prev_segment_angle)
+            angle_diffs = torch.cat([first_diff.unsqueeze(1), angle_diffs], dim=1)
+        angle_sum = torch.sum(angle_diffs, dim=1)
+        if prev_segment_angle is not None:
+            angle_sum = angle_sum * (n_diffs_base / angle_diffs.shape[1])
+        angle_sum_penalty = angle_sum ** angle_sum_power
+    elif K == 1 and prev_segment_angle is not None:
+        angle_diffs = torch.abs(angles[:, 0] - prev_segment_angle)
+        angle_sum_penalty = angle_diffs ** angle_sum_power
+    else:
+        angle_sum_penalty = torch.zeros(1, device=device, dtype=dtype)
+
+    # Projection
+    success_mask, tvt_batch, synt_curve_batch, first_start_idx = calc_horizontal_projection_batch_torch(
+        well_data, typewell_data, segments_batch, tvd_to_typewell_shift
+    )
+
+    # Get value array
+    last_end_idx = int(segments_torch[-1, 1].item())
+    N_indices = last_end_idx - first_start_idx + 1
+    value_slice = well_data['value'][first_start_idx:last_end_idx + 1]
+    value_batch = value_slice.unsqueeze(0)
+
+    # MSE and Pearson
+    mse = mse_batch_torch(value_batch, synt_curve_batch)
+    pearson = pearson_batch_torch(value_batch, synt_curve_batch)
+
+    # Compute objective
+    pearson_component = 1 - pearson
+    objective = (
+        (pearson_component ** pearson_power) *
+        (mse ** mse_power)
+    ) * (1 + angle_penalty + angle_sum_penalty)
+
+    return {
+        'objective': objective[0].item(),
+        'pearson': pearson[0].item(),
+        'mse': mse[0].item(),
+        'pearson_component': pearson_component[0].item(),
+        'angle_penalty': angle_penalty[0].item(),
+        'angle_sum_penalty': angle_sum_penalty[0].item(),
+        'angles_deg': angles_deg.tolist(),
+        'success': success_mask[0].item()
+    }
+
+
 class TorchObjectiveWrapper:
     """
     Wrapper class for use with EvoTorch or other optimizers.
@@ -167,6 +276,7 @@ class TorchObjectiveWrapper:
         angle_sum_power,
         min_pearson_value,
         tvd_to_typewell_shift=0.0,
+        prev_segment_angle=None,
         device='cuda'
     ):
         """
@@ -206,8 +316,13 @@ class TorchObjectiveWrapper:
         self.sc_power = sc_power
         self.angle_range = angle_range
         self.angle_sum_power = angle_sum_power
+
+        # Evaluation counter
+        self.eval_count = 0
+
         self.min_pearson_value = min_pearson_value
         self.tvd_to_typewell_shift = tvd_to_typewell_shift
+        self.prev_segment_angle = prev_segment_angle
 
     def __call__(self, shifts_batch):
         """
@@ -225,6 +340,9 @@ class TorchObjectiveWrapper:
         if shifts_batch.device != self.device:
             shifts_batch = shifts_batch.to(self.device)
 
+        # Count actual evaluations
+        self.eval_count += shifts_batch.shape[0]
+
         return batch_objective_function_torch(
             shifts_batch,
             self.well_data,
@@ -238,7 +356,8 @@ class TorchObjectiveWrapper:
             self.angle_range,
             self.angle_sum_power,
             self.min_pearson_value,
-            self.tvd_to_typewell_shift
+            self.tvd_to_typewell_shift,
+            self.prev_segment_angle
         )
 
     def evaluate_single(self, shifts):
@@ -258,3 +377,36 @@ class TorchObjectiveWrapper:
         shifts_batch = shifts.unsqueeze(0)
         result = self(shifts_batch)
         return result[0]
+
+    def compute_detailed(self, shifts, first_start_shift=None):
+        """
+        Compute detailed metrics for a single shift configuration.
+
+        Args:
+            shifts: tensor (K,) or array of shift values
+            first_start_shift: optional override for first segment's start_shift
+
+        Returns:
+            dict with objective, pearson, mse, angles, penalties
+        """
+        if not isinstance(shifts, torch.Tensor):
+            shifts = torch.tensor(shifts, dtype=torch.float64, device=self.device)
+
+        # Use modified segments_torch if first_start_shift provided
+        segments = self.segments_torch
+        if first_start_shift is not None:
+            segments = self.segments_torch.clone()
+            segments[0, 4] = first_start_shift  # Override first segment's start_shift
+
+        return compute_detailed_metrics_torch(
+            shifts,
+            self.well_data,
+            self.typewell_data,
+            segments,
+            self.pearson_power,
+            self.mse_power,
+            self.angle_range,
+            self.angle_sum_power,
+            self.tvd_to_typewell_shift,
+            self.prev_segment_angle
+        )

@@ -36,6 +36,10 @@ import logging
 import argparse
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
+from dotenv import load_dotenv
+
+# Load .env before any other imports that might read env vars
+load_dotenv()
 
 # Import Night Guard infrastructure
 from main import load_configuration, setup_logging

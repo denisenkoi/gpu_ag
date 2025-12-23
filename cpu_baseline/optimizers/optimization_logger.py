@@ -47,19 +47,21 @@ class OptimizationLogger:
                 writer = csv.writer(f)
                 writer.writerow([
                     'timestamp',
-                    'well_name', 
-                    'measured_depth',
+                    'well_name',
                     'step_type',
-                    'optimizer_method',
+                    'start_md',
+                    'end_md',
                     'segments_count',
-                    'iterations',
-                    'final_correlation',
-                    'pearson_correlation',
-                    'mse_value',
-                    'self_correlation',
-                    'intersections_count',
-                    'optimization_success',
-                    'function_evaluations'
+                    'fun',
+                    'pearson',
+                    'mse',
+                    'angle_penalty',
+                    'angle_sum_penalty',
+                    'angles',
+                    'actual_evals',
+                    'expected_evals',
+                    'elapsed_time',
+                    'success'
                 ])
         
         # Correlation metrics CSV
@@ -81,44 +83,45 @@ class OptimizationLogger:
     def log_optimization_result(self, optimization_result: Dict[str, Any]):
         """
         Log optimization result to CSV
-        
+
         Args:
             optimization_result: Dictionary containing optimization statistics
         """
         timestamp = time.time()
-        
-        # Extract data with assertions for required fields
+
+        # Extract data
         well_name = optimization_result['well_name']
-        measured_depth = optimization_result['measured_depth']
         step_type = optimization_result['step_type']
-        
+        start_md = optimization_result.get('start_md', 0)
+        end_md = optimization_result.get('end_md', optimization_result.get('measured_depth', 0))
+        angles = optimization_result.get('angles', '')
+
         stats = optimization_result['optimization_stats']
-        
+
         # Write to optimization CSV
         with open(self.optimization_csv, 'a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow([
                 timestamp,
                 well_name,
-                measured_depth,
                 step_type,
-                stats['method'],
+                f"{start_md:.1f}",
+                f"{end_md:.1f}",
                 stats['segments_count'],
-                stats['n_iterations'],
-                stats['final_correlation'],
-                stats['pearson_correlation'],
-                stats['mse_value'],
-                stats['self_correlation'],
-                stats['intersections_count'],
-                stats['success'],
-                stats['n_function_evaluations']
+                f"{stats['final_fun']:.6f}",
+                f"{stats.get('pearson', 0):.4f}",
+                f"{stats.get('mse', stats['final_fun']):.6f}",
+                f"{stats.get('angle_penalty', 0):.4f}",
+                f"{stats.get('angle_sum_penalty', 0):.4f}",
+                angles,
+                stats['n_function_evaluations'],
+                stats.get('expected_evaluations', stats['n_function_evaluations']),
+                f"{stats['elapsed_time']:.2f}",
+                stats['success']
             ])
-        
+
         # Store in memory for statistics
         self.optimization_stats.append(optimization_result)
-        
-        logger.info(f"Logged optimization result: {well_name} MD={measured_depth} "
-                   f"correlation={stats['final_correlation']:.6f}")
 
     def log_correlation_metrics(self, correlation_result: Dict[str, Any]):
         """
@@ -158,42 +161,45 @@ class OptimizationLogger:
     def get_optimization_statistics(self) -> Dict[str, Any]:
         """
         Get summary statistics for optimization results
-        
+
         Returns:
             Dictionary with optimization statistics summary
         """
         if not self.optimization_stats:
             return {'total_optimizations': 0}
-        
+
         # Calculate summary statistics
         total_optimizations = len(self.optimization_stats)
-        successful_optimizations = sum(1 for stat in self.optimization_stats 
+        successful_optimizations = sum(1 for stat in self.optimization_stats
                                      if stat['optimization_stats']['success'])
-        
-        correlations = [stat['optimization_stats']['final_correlation'] 
-                       for stat in self.optimization_stats]
-        
+
+        fun_values = [stat['optimization_stats']['mse_value']
+                     for stat in self.optimization_stats]
+        evals = [stat['optimization_stats']['n_function_evaluations']
+                for stat in self.optimization_stats]
+
         return {
             'total_optimizations': total_optimizations,
             'successful_optimizations': successful_optimizations,
             'success_rate': successful_optimizations / total_optimizations,
-            'avg_correlation': sum(correlations) / len(correlations),
-            'min_correlation': min(correlations),
-            'max_correlation': max(correlations)
+            'avg_fun': sum(fun_values) / len(fun_values),
+            'min_fun': min(fun_values),
+            'max_fun': max(fun_values),
+            'total_evals': sum(evals),
+            'avg_evals': sum(evals) / len(evals)
         }
 
     def print_statistics(self):
         """Print optimization statistics summary to console"""
         opt_stats = self.get_optimization_statistics()
-        
+
         if opt_stats['total_optimizations'] == 0:
             logger.info("No optimization statistics available")
             return
-        
+
         logger.info("=== Optimization Statistics Summary ===")
         logger.info(f"Total optimizations: {opt_stats['total_optimizations']}")
-        logger.info(f"Successful optimizations: {opt_stats['successful_optimizations']}")
-        logger.info(f"Success rate: {opt_stats['success_rate']:.1%}")
-        logger.info(f"Average correlation: {opt_stats['avg_correlation']:.6f}")
-        logger.info(f"Correlation range: {opt_stats['min_correlation']:.6f} - {opt_stats['max_correlation']:.6f}")
+        logger.info(f"Successful: {opt_stats['successful_optimizations']} ({opt_stats['success_rate']:.1%})")
+        logger.info(f"Objective (fun): avg={opt_stats['avg_fun']:.6f}, min={opt_stats['min_fun']:.6f}, max={opt_stats['max_fun']:.6f}")
+        logger.info(f"Function evals: total={opt_stats['total_evals']}, avg={opt_stats['avg_evals']:.0f}")
         logger.info("=== End Statistics ===")

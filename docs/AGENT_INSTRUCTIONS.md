@@ -4,47 +4,69 @@
 
 - Project: RND (area=rogii)
 - Epic: RND-770 (Python AG Integration)
-- Task: RND-790 (Improve reward function for GPU optimizer)
+- Текущие задачи:
+  - RND-790: Improve reward function (комментарий с результатами добавлен)
+  - RND-792: Research gamma smoothing effect
 
 ## Цель
 
-Улучшение функции награды для повышения качества интерпретации GPU оптимизатора.
+Улучшение функции награды и стабильности оптимизации GPU optimizer.
+
+## Ключевые находки (из RND-790)
+
+**Тест воспроизводимости CMA-ES (4 Run на Well1798~EGFDL):**
+
+| Run | Final RMSE | Sum Objective |
+|-----|------------|---------------|
+| 1 | 6.970м | 0.032 |
+| 2 | 6.970м | 0.031 |
+| 3 | 4.921м | 0.140 |
+| 4 | 6.970м | 0.031 |
+
+**КРИТИЧНО:** Корреляция objective↔RMSE **ОТРИЦАТЕЛЬНАЯ!**
+- Лучший RMSE (4.92м) = Худший objective (0.140)
+- Функция награды оптимизирует НЕ то, что нужно
 
 ## Чекпоинты
 
-### 1. Усовершенствование штрафов за углы
-- [ ] Добавить штраф за угол между последним frozen и первым оптимизируемым сегментом
-- [ ] Вычислять дисперсию GR вокруг угла (пол сегмента влево + пол сегмента вправо)
-- [ ] Модулировать штраф дисперсией: низкая → больше штраф, высокая → меньше штраф
-- [ ] Протестировать на полной скважине Well1798~EGFDL
+### 1. Сглаживание GR (RND-792)
+- [ ] Добавить параметр сглаживания (moving average / Gaussian filter)
+- [ ] Протестировать влияние на стабильность
+- [ ] Сравнить RMSE с разными уровнями сглаживания
+- [ ] Гипотеза: гладкая GR → гладкий ландшафт → лучший градиентный спуск
 
-### 2. Комбинации существующих параметров
-- [ ] Эксперименты с MSE_POWER (1.0, 2.0, 0.5)
-- [ ] Эксперименты с DIP_ANGLE_RANGE (2°, 5°, 10°)
-- [ ] Эксперименты с ANGLE_SUM_POWER
-- [ ] Найти оптимальную комбинацию
+### 2. Другие методы оптимизации
+- [ ] Попробовать scipy.minimize (L-BFGS-B, Powell)
+- [ ] Попробовать optuna
+- [ ] Комбинации: грубый поиск (CMA-ES) + локальная дооптимизация
+- [ ] Цель: стабильность + скорость
 
-### 3. Детектор перегибов из C++
-- [ ] Изучить логику детектора перегибов в AG daemon
-- [ ] Портировать в Python/PyTorch
-- [ ] Интегрировать в objective function
+### 3. Улучшение функции награды
+- [ ] Добавить накопительный RMSE в objective
+- [ ] Увеличить вес angle_sum_penalty
+- [ ] Дисперсия GR как модулятор штрафа
+- [ ] Grid penalty
 
-### 4. Использование гридов
-- [ ] Изучить формат гридов в slicing_well.json
-- [ ] Добавить grid penalty в objective
+## Запуск тестов
 
-### 5. Обновление pseudoTypeLog (self-correlation)
-- [ ] Реализовать корреляцию горизонтальной скважины на себя
-- [ ] Динамически расширять pseudo данными из well
-- [ ] Тестирование
+```bash
+cd /mnt/e/Projects/Rogii/gpu_ag
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate vllm
+
+# CMA-ES (текущий алгоритм)
+GPU_ALGORITHM=CMAES GPU_ANGLE_GRID_STEP=1.25 PYTHON_ANGLE_RANGE=5.0 \
+python slicer_gpu.py --de --starsteer-dir "/mnt/e/Projects/Rogii/ss/2025_3_release_dynamic_CUSTOM_instances/slicer_de" --max-iterations 0
+```
+
+**ВАЖНО:** `--max-iterations 0` = неограниченно (default=1!)
 
 ## Ключевые файлы
 
 | Файл | Описание |
 |------|----------|
-| `gpu_executor.py` | GPU executor с EvoTorch SNES |
+| `gpu_executor.py` | GPU executor с CMA-ES |
 | `torch_funcs/batch_objective.py` | Batch objective function |
-| `torch_funcs/converters.py` | calc_segment_angles_torch |
 | `.env` | Параметры оптимизации |
 
 ## Текущая формула objective
@@ -53,21 +75,15 @@
 objective = (1-pearson)² × mse^power × (1 + angle_penalty + angle_sum_penalty)
 ```
 
-Где:
-- `angle_penalty`: штраф за |angle| > DIP_ANGLE_RANGE
-- `angle_sum_penalty`: сумма |angle_diffs| между соседними сегментами
+## Метрики
 
-## Запуск тестов
-
-```bash
-cd /mnt/e/Projects/Rogii/gpu_ag
-source ~/miniconda3/etc/profile.d/conda.sh
-conda activate vllm
-python slicer_gpu.py --de --starsteer-dir "/mnt/e/Projects/Rogii/ss/2025_3_release_dynamic_CUSTOM_instances/slicer_de" --max-iterations 0
-```
+- ~97,000 evaluations/шаг (243 populations × 8 × 50)
+- ~1 мин на шаг (~45 шагов на полную скважину)
+- Тестовая скважина: Well1798~EGFDL (MD: 3772 → 5079м)
 
 ## КРИТИЧЕСКИЕ ПРАВИЛА
 
-1. **Не писать самописные оптимизаторы** — только EvoTorch, scipy, optuna
-2. **cpu_baseline/ — НЕ ТРОГАТЬ** без согласования
-3. **Результаты в worksheet.md**
+1. **Запускаем ВСЕГДА по всей скважине:** `--max-iterations 0`
+2. **НЕ МЕНЯТЬ КОД без явного подтверждения пользователя!**
+3. **cpu_baseline/ — НЕ ТРОГАТЬ** без согласования
+4. **Результаты записывать в worksheet.md**

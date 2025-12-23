@@ -45,3 +45,4 @@ Thumbs.db
 temp_work/
 task_queue/
 task_logs/
+/.env

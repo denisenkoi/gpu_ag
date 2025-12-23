@@ -42,7 +42,8 @@ from torch_funcs.batch_objective import TorchObjectiveWrapper
 
 # EvoTorch
 from evotorch import Problem
-from evotorch.algorithms import SNES
+from evotorch.algorithms import SNES, CMAES
+from scipy.optimize import differential_evolution
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,72 @@ logger = logging.getLogger(__name__)
 # Here: typeLog_GR / 1.446594 to match normalized well
 MDE_MULTIPLIER = 1.446594
 TYPELOG_NORM_COEF = 1.0 / MDE_MULTIPLIER  # ≈ 0.691
+
+
+def generate_population_centers(K: int, dip_range: float, step: float = 1.0) -> np.ndarray:
+    """
+    Generate initial centers for multi-population optimization.
+
+    Strategy:
+    - Point 1: 0° (from frozen segment)
+    - Point K: varies from -dip_range to +dip_range with step
+    - Points 2..K-1: bend (symmetric) + asymmetry
+
+    Args:
+        K: Number of segments (parameters)
+        dip_range: DIP_ANGLE_RANGE from .env
+        step: Step size in degrees (default 1.0)
+
+    Returns:
+        np.ndarray of shape (N_centers, K) with angles in degrees
+    """
+    centers = []
+
+    # End angles: -dip_range to +dip_range, step
+    end_angles = np.arange(-dip_range, dip_range + step/2, step)
+
+    # Bend values: -dip_range to +dip_range, step
+    bends = np.arange(-dip_range, dip_range + step/2, step)
+
+    # Asymmetry: 0, +1/4, -1/4 of dip_range
+    asymm_delta = dip_range / 4.0
+    asymmetries = [0.0, asymm_delta, -asymm_delta]
+
+    for end_angle in end_angles:
+        for bend in bends:
+            for asymm in asymmetries:
+                # Base line from 0 to end_angle
+                center = np.linspace(0, end_angle, K)
+
+                if K >= 4:
+                    # Apply bend and asymmetry to middle points
+                    # For K=4: points 1,2 are middle (indices 1,2)
+                    mid_start = 1
+                    mid_end = K - 1
+                    n_mid = mid_end - mid_start
+
+                    if n_mid == 2:
+                        # K=4: two middle points
+                        center[1] += bend + asymm
+                        center[2] += bend - asymm
+                    elif n_mid > 2:
+                        # K>4: distribute bend across middle points
+                        for i in range(mid_start, mid_end):
+                            # Asymmetry affects first and last middle points
+                            if i == mid_start:
+                                center[i] += bend + asymm
+                            elif i == mid_end - 1:
+                                center[i] += bend - asymm
+                            else:
+                                center[i] += bend
+
+                # Clip to valid range
+                center = np.clip(center, -dip_range, dip_range)
+                centers.append(center)
+
+    centers = np.array(centers)
+    logger.debug(f"Generated {len(centers)} population centers for K={K}, dip_range={dip_range}°, step={step}°")
+    return centers
 
 
 def extend_pseudo_with_typelog(pseudo_log: Dict, type_log: Dict) -> Dict:
@@ -134,6 +201,88 @@ def extend_pseudo_with_typelog(pseudo_log: Dict, type_log: Dict) -> Dict:
     return extended_pseudo
 
 
+def get_reference_shifts_for_segments(ref_segments, segment_end_mds_m, md_range, first_start_md_m=None):
+    """
+    Interpolate reference interpretation shifts to optimization segment end points.
+
+    Args:
+        ref_segments: List of reference segment dicts (starredInterpretation or referenceInterpretation)
+        segment_end_mds_m: List of end MD values for optimization segments (meters)
+        md_range: MD range for normalization
+        first_start_md_m: MD of first segment start (to get first_start_shift)
+
+    Returns:
+        (ref_shifts_m, ref_shifts_norm, first_start_shift_norm) - shifts in meters, normalized, and first start shift
+    """
+    ref_shifts_m = []
+    first_start_shift_m = 0.0
+
+    # Get first_start_shift if first_start_md provided
+    if first_start_md_m is not None:
+        for i, seg in enumerate(ref_segments):
+            seg_start = seg.get('startMd', 0)
+            seg_start_shift = seg.get('startShift', 0)
+            seg_end_shift = seg.get('endShift', 0)
+
+            if 'endMd' in seg:
+                seg_end = seg['endMd']
+            elif i + 1 < len(ref_segments):
+                seg_end = ref_segments[i + 1].get('startMd', seg_start)
+            else:
+                seg_end = seg_start + 1000
+
+            if seg_start <= first_start_md_m <= seg_end:
+                if seg_end > seg_start:
+                    ratio = (first_start_md_m - seg_start) / (seg_end - seg_start)
+                    first_start_shift_m = seg_start_shift + ratio * (seg_end_shift - seg_start_shift)
+                else:
+                    first_start_shift_m = seg_start_shift
+                break
+            elif first_start_md_m < seg_start:
+                first_start_shift_m = seg_start_shift
+                break
+        else:
+            if ref_segments:
+                first_start_shift_m = ref_segments[-1].get('endShift', 0)
+
+    for end_md in segment_end_mds_m:
+        shift = 0.0
+        for i, seg in enumerate(ref_segments):
+            seg_start = seg.get('startMd', 0)
+            seg_start_shift = seg.get('startShift', 0)
+            seg_end_shift = seg.get('endShift', 0)
+
+            # Get end_md
+            if 'endMd' in seg:
+                seg_end = seg['endMd']
+            elif i + 1 < len(ref_segments):
+                seg_end = ref_segments[i + 1].get('startMd', seg_start)
+            else:
+                seg_end = seg_start + 1000
+
+            # Check if end_md is within this segment
+            if seg_start <= end_md <= seg_end:
+                if seg_end > seg_start:
+                    ratio = (end_md - seg_start) / (seg_end - seg_start)
+                    shift = seg_start_shift + ratio * (seg_end_shift - seg_start_shift)
+                else:
+                    shift = seg_start_shift
+                break
+            elif end_md < seg_start:
+                shift = seg_start_shift
+                break
+        else:
+            if ref_segments:
+                shift = ref_segments[-1].get('endShift', 0)
+
+        ref_shifts_m.append(shift)
+
+    # Normalize
+    ref_shifts_norm = [s / md_range for s in ref_shifts_m]
+    first_start_shift_norm = first_start_shift_m / md_range
+    return ref_shifts_m, ref_shifts_norm, first_start_shift_norm
+
+
 class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
     """GPU-accelerated AutoGeosteering executor using EvoTorch SNES
 
@@ -183,6 +332,8 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         self.popsize = int(os.getenv('GPU_POPSIZE', '100'))
         self.maxiter = int(os.getenv('GPU_MAXITER', '200'))
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.algorithm = os.getenv('GPU_ALGORITHM', 'SNES').upper()  # SNES, DE, or CMAES
+        self.angle_grid_step = float(os.getenv('GPU_ANGLE_GRID_STEP', '1.0'))  # Angle grid step for center generation (degrees)
 
         # PseudoTypeLog support
         self.use_pseudo_typelog = os.getenv('USE_PSEUDOTYPELOG', 'false').lower() == 'true'
@@ -195,13 +346,15 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         self.well_name = None
         self.start_idx = None
         self.start_md_meters = None
+        self.reference_segments = None  # For comparison with manual interpretation
+        self.last_num_populations = 1  # For logging function evaluations
 
         # Logging
         self.optimization_logger = OptimizationLogger(results_dir)
         self.interpretation_dir = work_dir
         Path(self.interpretation_dir).mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"GPU executor initialized: device={self.device}, "
+        logger.info(f"GPU executor initialized: device={self.device}, algorithm={self.algorithm}, "
                     f"restarts={self.n_restarts}, popsize={self.popsize}, maxiter={self.maxiter}, "
                     f"use_pseudo={self.use_pseudo_typelog}")
 
@@ -352,8 +505,14 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         total = len(self.interpretation)
         return list(range(total - num_new_segments, total))
 
-    def _create_wrapper_and_bounds(self, segments: List, self_corr_start_idx: int):
-        """Create TorchObjectiveWrapper and bounds for optimization"""
+    def _create_wrapper_and_bounds(self, segments: List, self_corr_start_idx: int, prev_segment_angle: float = None):
+        """Create TorchObjectiveWrapper and bounds for optimization
+
+        Args:
+            segments: List of segments to optimize
+            self_corr_start_idx: Starting index for self-correlation
+            prev_segment_angle: Angle of last frozen segment (degrees), used for angle_sum_penalty
+        """
         bounds = calculate_optimization_bounds(segments, angle_range=self.angle_range, accumulative=True)
         bounds_tensor = torch.tensor(bounds, dtype=torch.float64, device=self.device)
 
@@ -382,23 +541,29 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
             angle_sum_power=2.0,
             min_pearson_value=self.min_pearson_value,
             tvd_to_typewell_shift=self.tvd_to_typewell_shift,
+            prev_segment_angle=prev_segment_angle,
             device=self.device
         )
 
         return wrapper, bounds_tensor
 
-    def _optimize_with_snes(self, segments: List, self_corr_start_idx: int) -> tuple:
+    def _optimize_with_snes(self, segments: List, self_corr_start_idx: int, prev_segment_angle: float = None) -> tuple:
         """Run EvoTorch SNES optimization
 
+        Args:
+            segments: List of segments to optimize
+            self_corr_start_idx: Starting index for self-correlation
+            prev_segment_angle: Angle of last frozen segment (degrees)
+
         Returns:
-            (best_fun, best_shifts, elapsed_time)
+            (best_fun, best_shifts, elapsed_time, wrapper)
         """
-        wrapper, bounds = self._create_wrapper_and_bounds(segments, self_corr_start_idx)
+        wrapper, bounds = self._create_wrapper_and_bounds(segments, self_corr_start_idx, prev_segment_angle)
 
         K = len(segments)
         lb = bounds[:, 0].cpu().numpy()
         ub = bounds[:, 1].cpu().numpy()
-        stdev_init = (ub - lb).mean() / 4.0
+        stdev_init = (ub - lb).mean() / 2.0  # was /4.0 - wider initial distribution
 
         # Define EvoTorch Problem
         class AGProblem(Problem):
@@ -420,38 +585,101 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         best_overall_fun = float('inf')
         best_overall_x = None
 
-        for restart in range(self.n_restarts):
-            problem = AGProblem()
-            searcher = SNES(
-                problem,
-                popsize=self.popsize,
-                stdev_init=stdev_init,
-                center_learning_rate=0.5,
-                stdev_learning_rate=0.1
+        # Choose algorithm: SNES, DE, or CMAES
+        if self.algorithm == 'DE':
+            # Scipy DE with uniform distribution
+            bounds_list = list(zip(lb, ub))
+
+            def scipy_objective(x):
+                x_tensor = torch.tensor(x, dtype=torch.float64, device=self.device).unsqueeze(0)
+                return wrapper(x_tensor).item()
+
+            result = differential_evolution(
+                scipy_objective,
+                bounds_list,
+                maxiter=self.maxiter,
+                popsize=max(15, self.popsize // 10),  # DE uses smaller popsize
+                mutation=(0.5, 1.0),
+                recombination=0.7,
+                seed=None,
+                polish=False,
+                workers=1  # GPU wrapper not thread-safe
             )
+            best_overall_fun = result.fun
+            best_overall_x = torch.tensor(result.x, dtype=torch.float64, device=self.device)
 
-            for _ in range(self.maxiter):
-                searcher.step()
+        elif self.algorithm == 'CMAES':
+            # CMA-ES with multi-population from generated centers
+            centers = generate_population_centers(K, self.angle_range, self.angle_grid_step)
+            self.last_num_populations = len(centers)
+            total_evals = len(centers) * self.popsize * self.maxiter
+            logger.info(f"CMAES: {len(centers)} populations, popsize={self.popsize}, maxiter={self.maxiter}, total_evals={total_evals}")
 
-            pop = searcher.population
-            if pop is not None and hasattr(pop, 'evals') and pop.evals is not None:
-                valid_mask = ~torch.isinf(pop.evals)
-                if valid_mask.any():
-                    best_idx = pop.evals.argmin()
-                    best_fun = pop.evals[best_idx].item()
-                    best_x = pop.values[best_idx]
-                    if best_fun < best_overall_fun:
-                        best_overall_fun = best_fun
-                        best_overall_x = best_x.clone()
+            for i, center_angles in enumerate(centers):
+                # Convert angles to shifts
+                center_shifts = center_angles / self.angle_range * (ub - lb) / 2 + (ub + lb) / 2
+                center_shifts = np.clip(center_shifts, lb, ub)
+                center_init = torch.tensor(center_shifts, dtype=torch.float64, device=self.device)
+
+                problem = AGProblem()
+                searcher = CMAES(
+                    problem,
+                    stdev_init=stdev_init,
+                    popsize=self.popsize,
+                    center_init=center_init
+                )
+
+                for _ in range(self.maxiter):
+                    searcher.step()
+
+                pop = searcher.population
+                if pop is not None and hasattr(pop, 'evals') and pop.evals is not None:
+                    valid_mask = ~torch.isinf(pop.evals)
+                    if valid_mask.any():
+                        best_idx = pop.evals.argmin()
+                        best_fun = pop.evals[best_idx].item()
+                        best_x = pop.values[best_idx]
+                        if best_fun < best_overall_fun:
+                            best_overall_fun = best_fun
+                            best_overall_x = best_x.clone()
+
+            if best_overall_x is None:
+                best_overall_x = torch.tensor((lb + ub) / 2, dtype=torch.float64, device=self.device)
+                best_overall_fun = wrapper(best_overall_x.unsqueeze(0)).item()
+
+        else:  # SNES (default)
+            for restart in range(self.n_restarts):
+                problem = AGProblem()
+                searcher = SNES(
+                    problem,
+                    popsize=self.popsize,
+                    stdev_init=stdev_init,
+                    center_learning_rate=0.5,
+                    stdev_learning_rate=0.1
+                )
+
+                for _ in range(self.maxiter):
+                    searcher.step()
+
+                pop = searcher.population
+                if pop is not None and hasattr(pop, 'evals') and pop.evals is not None:
+                    valid_mask = ~torch.isinf(pop.evals)
+                    if valid_mask.any():
+                        best_idx = pop.evals.argmin()
+                        best_fun = pop.evals[best_idx].item()
+                        best_x = pop.values[best_idx]
+                        if best_fun < best_overall_fun:
+                            best_overall_fun = best_fun
+                            best_overall_x = best_x.clone()
+
+            if best_overall_x is None:
+                # Fallback to center of bounds
+                best_overall_x = torch.tensor((lb + ub) / 2, dtype=torch.float64, device=self.device)
+                best_overall_fun = wrapper(best_overall_x.unsqueeze(0)).item()
 
         elapsed = time.time() - start_time
 
-        if best_overall_x is None:
-            # Fallback to center of bounds
-            best_overall_x = torch.tensor((lb + ub) / 2, dtype=torch.float64, device=self.device)
-            best_overall_fun = wrapper(best_overall_x.unsqueeze(0)).item()
-
-        return best_overall_fun, best_overall_x.cpu().tolist(), elapsed
+        return best_overall_fun, best_overall_x.cpu().tolist(), elapsed, wrapper
 
     def _apply_optimized_shifts(self, segments: List, optimal_shifts: List) -> List:
         """Apply optimized shifts to segments"""
@@ -530,6 +758,12 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
 
         manual_segments_json = well_data.get('interpretation', {}).get('segments', [])
 
+        # Store reference interpretation for comparison
+        self.reference_segments = well_data.get('referenceInterpretation', {}).get('segments', [])
+        if not self.reference_segments:
+            self.reference_segments = well_data.get('starredInterpretation', {}).get('segments', [])
+        logger.debug(f"Reference interpretation: {len(self.reference_segments)} segments")
+
         # Calculate fixed planning horizon
         self.fixed_min_md = self.ag_well.min_md
         self.fixed_md_range = (self.ag_well.max_md + self.md_normalization_buffer) - self.fixed_min_md
@@ -571,8 +805,20 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         optimize_indices = self._get_optimization_indices(num_new)
         segments_to_optimize = [self.interpretation[i] for i in optimize_indices]
 
-        best_fun, optimal_shifts, elapsed = self._optimize_with_snes(
-            segments_to_optimize, self.start_idx
+        # Get prev_segment_angle (last frozen segment before optimization)
+        prev_segment_angle = None
+        if optimize_indices and optimize_indices[0] > 0:
+            prev_segment = self.interpretation[optimize_indices[0] - 1]
+            prev_segment_angle = prev_segment.angle
+            logger.debug(f"prev_segment_angle={prev_segment_angle:.2f}° from frozen segment")
+
+        best_fun, optimal_shifts, elapsed, wrapper = self._optimize_with_snes(
+            segments_to_optimize, self.start_idx, prev_segment_angle
+        )
+
+        # Compute detailed metrics comparison
+        self._log_metrics_comparison(
+            wrapper, optimal_shifts, segments_to_optimize, 'init'
         )
 
         # Apply optimized shifts
@@ -582,7 +828,7 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
 
         # Log
         self._log_optimization_result('init', self.ag_well.measured_depth[-1] * self.fixed_md_range + self.fixed_min_md,
-                                      best_fun, elapsed)
+                                      best_fun, elapsed, wrapper, optimal_shifts, segments_to_optimize)
 
         # STEP 5: Save
         json_segments = self._denormalize_segments_to_json(self.interpretation)
@@ -643,8 +889,20 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         optimize_indices = self._get_optimization_indices(num_new)
         segments_to_optimize = [self.interpretation[i] for i in optimize_indices]
 
-        best_fun, optimal_shifts, elapsed = self._optimize_with_snes(
-            segments_to_optimize, lookback_idx
+        # Get prev_segment_angle (last frozen segment before optimization)
+        prev_segment_angle = None
+        if optimize_indices and optimize_indices[0] > 0:
+            prev_segment = self.interpretation[optimize_indices[0] - 1]
+            prev_segment_angle = prev_segment.angle
+            logger.debug(f"prev_segment_angle={prev_segment_angle:.2f}° from frozen segment")
+
+        best_fun, optimal_shifts, elapsed, wrapper = self._optimize_with_snes(
+            segments_to_optimize, lookback_idx, prev_segment_angle
+        )
+
+        # Compute detailed metrics comparison
+        self._log_metrics_comparison(
+            wrapper, optimal_shifts, segments_to_optimize, 'step'
         )
 
         optimized_segments = self._apply_optimized_shifts(segments_to_optimize, optimal_shifts)
@@ -653,7 +911,7 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
 
         # Log
         self._log_optimization_result('step', current_md * self.fixed_md_range + self.fixed_min_md,
-                                      best_fun, elapsed)
+                                      best_fun, elapsed, wrapper, optimal_shifts, segments_to_optimize)
 
         # STEP 5: Save
         json_segments = self._denormalize_segments_to_json(self.interpretation)
@@ -670,11 +928,35 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         return result
 
     def _log_optimization_result(self, step_type: str, measured_depth: float,
-                                 best_fun: float, elapsed: float):
+                                 best_fun: float, elapsed: float,
+                                 wrapper=None, optimal_shifts=None, segments=None):
         """Log optimization result to statistics"""
+        import torch
+
+        # Get actual function evaluations from wrapper
+        actual_evals = wrapper.eval_count if wrapper else 0
+
+        # Calculate expected evaluations for comparison
+        if self.algorithm == 'CMAES':
+            expected_evals = self.last_num_populations * self.popsize * self.maxiter
+        else:
+            expected_evals = self.n_restarts * self.maxiter * self.popsize
+
+        # Get detailed metrics from wrapper
+        detailed = {}
+        angles_str = ""
+        if wrapper and optimal_shifts:
+            shifts_tensor = torch.tensor(optimal_shifts, dtype=torch.float64, device=self.device)
+            detailed = wrapper.compute_detailed(shifts_tensor)
+            angles_str = ",".join([f"{a:.2f}" for a in detailed.get('angles_deg', [])])
+
+        # Get MD range from segments
+        start_md = segments[0].start_md * self.fixed_md_range + self.fixed_min_md if segments else 0
+        end_md = segments[-1].end_md * self.fixed_md_range + self.fixed_min_md if segments else measured_depth
+
         optimization_stats = {
-            'method': 'EvoTorch_SNES',
-            'segments_count': self.segments_count,
+            'method': f'EvoTorch_{self.algorithm}',
+            'segments_count': len(segments) if segments else self.segments_count,
             'n_restarts': self.n_restarts,
             'popsize': self.popsize,
             'maxiter': self.maxiter,
@@ -682,27 +964,84 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
             'elapsed_time': elapsed,
             'device': self.device,
             'success': True,
-            # Fields required by optimization_logger
-            'n_iterations': self.n_restarts * self.maxiter,
-            'n_function_evaluations': self.n_restarts * self.maxiter * self.popsize,
-            'final_correlation': 1.0 - best_fun,  # approximate
-            'pearson_correlation': 0.0,  # not calculated in GPU version
-            'mse_value': best_fun,
-            'self_correlation': 0.0,  # not calculated in GPU version
-            'intersections_count': 0  # not checked in GPU version
+            # Actual vs expected evaluations
+            'n_iterations': self.last_num_populations * self.maxiter if self.algorithm == 'CMAES' else self.n_restarts * self.maxiter,
+            'n_function_evaluations': actual_evals,
+            'expected_evaluations': expected_evals,
+            # Detailed metrics
+            'pearson': detailed.get('pearson', 0.0),
+            'mse': detailed.get('mse', best_fun),
+            'angle_penalty': detailed.get('angle_penalty', 0.0),
+            'angle_sum_penalty': detailed.get('angle_sum_penalty', 0.0),
+            # Legacy fields
+            'final_correlation': detailed.get('pearson', 0.0),
+            'pearson_correlation': detailed.get('pearson', 0.0),
+            'mse_value': detailed.get('mse', best_fun),
+            'self_correlation': 0.0,
+            'intersections_count': 0
         }
 
         optimization_result = {
             'well_name': self.well_name,
             'measured_depth': measured_depth,
             'step_type': step_type,
+            'start_md': start_md,
+            'end_md': end_md,
+            'angles': angles_str,
             'optimization_stats': optimization_stats
         }
 
-        logger.info(f"Optimization [{step_type}]: fun={best_fun:.4f}, time={elapsed:.2f}s, "
-                    f"device={self.device}")
+        logger.info(f"Optimization [{step_type}]: MD={start_md:.1f}-{end_md:.1f}m, fun={best_fun:.6f}, "
+                    f"evals={actual_evals}, pearson={detailed.get('pearson', 0):.4f}, "
+                    f"mse={detailed.get('mse', 0):.6f}, time={elapsed:.2f}s")
 
         self.optimization_logger.log_optimization_result(optimization_result)
+
+    def _log_metrics_comparison(self, wrapper, optimal_shifts: List[float],
+                                segments: List, step_type: str):
+        """Log detailed metrics comparison: optimized vs reference interpretation"""
+        if not self.reference_segments:
+            logger.debug("No reference interpretation for comparison")
+            return
+
+        # Get segment start and end MDs in meters
+        first_start_md_m = segments[0].start_md * self.fixed_md_range + self.fixed_min_md
+        segment_end_mds_m = []
+        for seg in segments:
+            end_md_m = seg.end_md * self.fixed_md_range + self.fixed_min_md
+            segment_end_mds_m.append(end_md_m)
+
+        # Get reference shifts interpolated to our segments
+        ref_shifts_m, ref_shifts_norm, first_start_shift_norm = get_reference_shifts_for_segments(
+            self.reference_segments, segment_end_mds_m, self.fixed_md_range, first_start_md_m
+        )
+
+        # Compute detailed metrics for optimized
+        opt_metrics = wrapper.compute_detailed(optimal_shifts)
+
+        # Compute detailed metrics for reference (with corrected first_start_shift)
+        ref_metrics = wrapper.compute_detailed(ref_shifts_norm, first_start_shift=first_start_shift_norm)
+
+        # Log comparison
+        logger.info(f"=== Metrics Comparison [{step_type}] ===")
+        logger.info(f"  {'':12} | {'Optimized':>12} | {'Reference':>12} | {'Diff':>10}")
+        logger.info(f"  {'-'*12}-+-{'-'*12}-+-{'-'*12}-+-{'-'*10}")
+        logger.info(f"  {'Objective':12} | {opt_metrics['objective']:>12.6f} | {ref_metrics['objective']:>12.6f} | {opt_metrics['objective'] - ref_metrics['objective']:>+10.6f}")
+        logger.info(f"  {'Pearson':12} | {opt_metrics['pearson']:>12.6f} | {ref_metrics['pearson']:>12.6f} | {opt_metrics['pearson'] - ref_metrics['pearson']:>+10.6f}")
+        logger.info(f"  {'MSE':12} | {opt_metrics['mse']:>12.6f} | {ref_metrics['mse']:>12.6f} | {opt_metrics['mse'] - ref_metrics['mse']:>+10.6f}")
+        logger.info(f"  {'AnglePenalty':12} | {opt_metrics['angle_penalty']:>12.6f} | {ref_metrics['angle_penalty']:>12.6f} | {opt_metrics['angle_penalty'] - ref_metrics['angle_penalty']:>+10.6f}")
+        logger.info(f"  {'AngleSumPen':12} | {opt_metrics['angle_sum_penalty']:>12.6f} | {ref_metrics['angle_sum_penalty']:>12.6f} | {opt_metrics['angle_sum_penalty'] - ref_metrics['angle_sum_penalty']:>+10.6f}")
+
+        # Log angles
+        opt_angles = opt_metrics['angles_deg']
+        ref_angles = ref_metrics['angles_deg']
+        logger.info(f"  Angles (°):  Opt={[f'{a:.2f}' for a in opt_angles]}  Ref={[f'{a:.2f}' for a in ref_angles]}")
+
+        # Status
+        if opt_metrics['objective'] <= ref_metrics['objective']:
+            logger.info(f"  ✓ Optimized BETTER than reference")
+        else:
+            logger.info(f"  ✗ Reference BETTER than optimized (diff={opt_metrics['objective'] - ref_metrics['objective']:.6f})")
 
     def _copy_output_to_comparison_dir(self, interpretation_data: Dict[str, Any], well_name: str, step_type: str, current_md: float):
         """Copy OUTPUT interpretation JSON to comparison directory for debugging
