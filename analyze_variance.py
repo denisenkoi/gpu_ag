@@ -8,6 +8,10 @@ Builds a table showing variance of normalized GR around each segment boundary.
 import json
 import numpy as np
 from pathlib import Path
+from dotenv import load_dotenv
+from gr_utils import apply_gr_smoothing, get_smoothing_params
+
+load_dotenv()
 
 # Source data - use saved raw file from json_comparison (has both well and interpretation)
 SOURCE_WELL = Path("/mnt/e/Projects/Rogii/gpu_ag/json_comparison/new_slicing_well_raw_5032.9.json")
@@ -90,6 +94,14 @@ def main():
         print("No GR data found!")
         return
 
+    # Apply GR smoothing (same as in optimizer)
+    smoothing = get_smoothing_params()
+    if smoothing['enabled']:
+        print(f"GR smoothing: Savitzky-Golay (window={smoothing['window']}, order={smoothing['order']})")
+        gr_array = apply_gr_smoothing(gr_array)
+    else:
+        print("GR smoothing: disabled")
+
     # Normalize GR
     gr_norm = normalize_gr(gr_array)
 
@@ -104,7 +116,12 @@ def main():
 
     for i, seg in enumerate(segments):
         start_md = seg.get('startMd', 0)
-        end_md = seg.get('endMd', 0)
+        # end_md = startMd of next segment (segments only have startMd)
+        if i + 1 < len(segments):
+            end_md = segments[i + 1].get('startMd', 0)
+        else:
+            # Last segment - use well end or skip
+            continue
         seg_len = end_md - start_md
 
         # Skip segments before analysis start
@@ -115,9 +132,9 @@ def main():
         boundary_md = end_md
 
         # Window: half segment left + half segment right
-        # For last segment, use its own length for right side
-        if i + 1 < len(segments):
-            next_seg_len = segments[i + 1].get('endMd', 0) - segments[i + 1].get('startMd', 0)
+        if i + 2 < len(segments):
+            next_seg_end = segments[i + 2].get('startMd', 0)
+            next_seg_len = next_seg_end - end_md
             half_right = next_seg_len / 2
         else:
             half_right = seg_len / 2
@@ -156,13 +173,17 @@ def main():
         f.write("seg_idx,boundary_md_m,boundary_md_ft,seg_len_m,window_m,var_x100,std_x10\n")
         for i, seg in enumerate(segments):
             start_md = seg.get('startMd', 0)
-            end_md = seg.get('endMd', 0)
+            if i + 1 < len(segments):
+                end_md = segments[i + 1].get('startMd', 0)
+            else:
+                continue
             seg_len = end_md - start_md
             if end_md < analysis_start_md:
                 continue
             boundary_md = end_md
-            if i + 1 < len(segments):
-                next_seg_len = segments[i + 1].get('endMd', 0) - segments[i + 1].get('startMd', 0)
+            if i + 2 < len(segments):
+                next_seg_end = segments[i + 2].get('startMd', 0)
+                next_seg_len = next_seg_end - end_md
                 half_right = next_seg_len / 2
             else:
                 half_right = seg_len / 2

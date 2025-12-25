@@ -44,14 +44,9 @@ from torch_funcs.batch_objective import TorchObjectiveWrapper
 from evotorch import Problem
 from evotorch.algorithms import SNES, CMAES
 from scipy.optimize import differential_evolution
+from gr_utils import apply_gr_smoothing
 
 logger = logging.getLogger(__name__)
-
-# Normalization coefficient from MDE for Well1798~EGFDL
-# In MDE: well_GR × 1.446594 → normalized
-# Here: typeLog_GR / 1.446594 to match normalized well
-MDE_MULTIPLIER = 1.446594
-TYPELOG_NORM_COEF = 1.0 / MDE_MULTIPLIER  # ≈ 0.691
 
 
 def generate_population_centers(K: int, dip_range: float, step: float = 1.0) -> np.ndarray:
@@ -118,87 +113,6 @@ def generate_population_centers(K: int, dip_range: float, step: float = 1.0) -> 
     centers = np.array(centers)
     logger.debug(f"Generated {len(centers)} population centers for K={K}, dip_range={dip_range}°, step={step}°")
     return centers
-
-
-def extend_pseudo_with_typelog(pseudo_log: Dict, type_log: Dict) -> Dict:
-    """
-    Extend pseudoTypeLog with interpolated points from typeLog.
-
-    - Takes points from typeLog where TVD > max(pseudo.TVD)
-    - Interpolates to pseudo's step size (0.03048m)
-    - Normalizes data by TYPELOG_NORM_COEF
-    """
-    pseudo_points = pseudo_log['tvdSortedPoints']
-    type_points = type_log['tvdSortedPoints']
-
-    if not pseudo_points or not type_points:
-        return pseudo_log
-
-    # Get TVD ranges
-    pseudo_max_tvd = pseudo_points[-1]['trueVerticalDepth']
-    type_max_tvd = type_points[-1]['trueVerticalDepth']
-
-    if type_max_tvd <= pseudo_max_tvd:
-        logger.info(f"typeLog TVD ({type_max_tvd:.1f}) <= pseudo TVD ({pseudo_max_tvd:.1f}), no extension needed")
-        return pseudo_log
-
-    # Calculate pseudo step
-    pseudo_step = pseudo_points[1]['trueVerticalDepth'] - pseudo_points[0]['trueVerticalDepth']
-
-    # Build typeLog interpolation arrays (only points after pseudo range)
-    type_tvd = []
-    type_data = []
-    for p in type_points:
-        tvd = p['trueVerticalDepth']
-        if tvd >= pseudo_max_tvd - pseudo_step:  # Include overlap for interpolation
-            type_tvd.append(tvd)
-            type_data.append(p['data'])
-
-    if len(type_tvd) < 2:
-        logger.warning("Not enough typeLog points for interpolation")
-        return pseudo_log
-
-    type_tvd = np.array(type_tvd)
-    type_data = np.array(type_data)
-
-    # Create new TVD grid from pseudo_max_tvd to type_max_tvd with pseudo step
-    new_tvd_grid = np.arange(pseudo_max_tvd + pseudo_step, type_max_tvd + pseudo_step/2, pseudo_step)
-
-    # Interpolate typeLog data to new grid
-    new_data = np.interp(new_tvd_grid, type_tvd, type_data)
-
-    # Normalize
-    new_data = new_data * TYPELOG_NORM_COEF
-
-    # Create new points
-    new_points = []
-    for tvd, data in zip(new_tvd_grid, new_data):
-        new_points.append({
-            'data': float(data),
-            'measuredDepth': float(tvd),  # Approximation: TVD ≈ MD in horizontal section
-            'trueVerticalDepth': float(tvd)
-        })
-
-    # Also need to extend 'points' array (MD-based)
-    pseudo_points_md = pseudo_log['points']
-    new_points_md = []
-    for tvd, data in zip(new_tvd_grid, new_data):
-        new_points_md.append({
-            'data': float(data),
-            'measuredDepth': float(tvd)
-        })
-
-    # Create extended pseudo log
-    extended_pseudo = {
-        'points': pseudo_points_md + new_points_md,
-        'tvdSortedPoints': pseudo_points + new_points,
-        'uuid': pseudo_log.get('uuid', '')
-    }
-
-    logger.info(f"Extended pseudoTypeLog: {len(pseudo_points)} -> {len(extended_pseudo['tvdSortedPoints'])} points, "
-                f"TVD {pseudo_max_tvd:.1f} -> {new_tvd_grid[-1]:.1f}m, norm_coef={TYPELOG_NORM_COEF:.3f}")
-
-    return extended_pseudo
 
 
 def get_reference_shifts_for_segments(ref_segments, segment_end_mds_m, md_range, first_start_md_m=None):
@@ -332,10 +246,11 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         self.popsize = int(os.getenv('GPU_POPSIZE', '100'))
         self.maxiter = int(os.getenv('GPU_MAXITER', '200'))
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.algorithm = os.getenv('GPU_ALGORITHM', 'SNES').upper()  # SNES, DE, or CMAES
+        self.algorithm = os.getenv('GPU_ALGORITHM', 'CMAES').upper()  # CMAES, MONTECARLO, SNES, DE
         self.angle_grid_step = float(os.getenv('GPU_ANGLE_GRID_STEP', '1.0'))  # Angle grid step for center generation (degrees)
         self.cmaes_mode = os.getenv('GPU_CMAES_MODE', 'multi').lower()  # 'single' or 'multi'
         self.single_popsize = int(os.getenv('GPU_SINGLE_POPSIZE', '500'))  # popsize for single mode
+        self.montecarlo_samples = int(os.getenv('GPU_MONTECARLO_SAMPLES', '100000'))  # samples for Monte Carlo
 
         # PseudoTypeLog support
         self.use_pseudo_typelog = os.getenv('USE_PSEUDOTYPELOG', 'false').lower() == 'true'
@@ -361,6 +276,11 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                     f"restarts={self.n_restarts}, popsize={self.popsize}, maxiter={self.maxiter}, "
                     f"use_pseudo={self.use_pseudo_typelog}")
 
+    def set_algorithm(self, algorithm: str):
+        """Override algorithm from CLI parameter"""
+        self.algorithm = algorithm.upper()
+        logger.info(f"Algorithm overridden to: {self.algorithm}")
+
     def start_daemon(self):
         """Start GPU executor"""
         logger.info(f"GPU AutoGeosteering executor ready (device={self.device})")
@@ -373,21 +293,12 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         self.optimization_logger.print_statistics()
 
     def _create_typewell(self, well_data: Dict[str, Any]) -> TypeWell:
-        """Create TypeWell, optionally using extended pseudoTypeLog"""
-        if self.use_pseudo_typelog and 'pseudoTypeLog' in well_data:
-            logger.info("Using extended pseudoTypeLog (tvdTypewellShift=0)")
-            well_data_for_typewell = dict(well_data)
-            # Extend pseudoTypeLog with normalized typeLog points
-            extended_pseudo = extend_pseudo_with_typelog(
-                well_data['pseudoTypeLog'],
-                well_data['typeLog']
-            )
-            well_data_for_typewell['typeLog'] = extended_pseudo
-            return TypeWell(well_data_for_typewell)
-        else:
-            if self.use_pseudo_typelog:
-                logger.warning("USE_PSEUDOTYPELOG=true but pseudoTypeLog not found, using typeLog")
-            return TypeWell(well_data)
+        """Create TypeWell from well_data.
+
+        Note: TypeWell transformation (pseudo_stitched mode) is now handled
+        by TypewellProvider in emulator_processor before data reaches executor.
+        """
+        return TypeWell(well_data)
 
     def _get_tvd_shift(self, well_data: Dict[str, Any]) -> float:
         """Get TVD shift (0 for pseudoTypeLog)"""
@@ -524,6 +435,10 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
 
         # Convert to numpy then torch
         well_np = well_to_numpy(self.ag_well)
+
+        # Apply GR smoothing (uses settings from .env via gr_utils)
+        well_np['value'] = apply_gr_smoothing(well_np['value'])
+
         typewell_np = typewell_to_numpy(self.ag_typewell)
         segments_np = segments_to_numpy(segments, self.ag_well)
 
@@ -694,6 +609,27 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                 if best_overall_x is None:
                     best_overall_x = torch.tensor((lb + ub) / 2, dtype=torch.float64, device=self.device)
                     best_overall_fun = wrapper(best_overall_x.unsqueeze(0)).item()
+
+        elif self.algorithm == 'MONTECARLO':
+            # Pure random search on GPU - uniform sampling
+            samples = self.montecarlo_samples
+            logger.info(f"MONTECARLO: {samples} random samples, bounds={K}D")
+
+            # Generate uniform random samples within bounds
+            lb_tensor = torch.tensor(lb, dtype=torch.float64, device=self.device)
+            ub_tensor = torch.tensor(ub, dtype=torch.float64, device=self.device)
+            random_samples = torch.rand(samples, K, dtype=torch.float64, device=self.device)
+            random_samples = random_samples * (ub_tensor - lb_tensor) + lb_tensor
+
+            # Evaluate all samples at once (GPU batch)
+            fitness = wrapper(random_samples)
+
+            # Find best
+            best_idx = fitness.argmin()
+            best_overall_fun = fitness[best_idx].item()
+            best_overall_x = random_samples[best_idx].clone()
+
+            self.last_num_populations = 1
 
         else:  # SNES (default)
             for restart in range(self.n_restarts):

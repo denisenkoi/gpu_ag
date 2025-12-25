@@ -576,8 +576,19 @@ class StarSteerSlicerOrchestrator:
                 f.write(json.dumps(log_record, ensure_ascii=False) + '\n')
             logger.debug(f"Logged command to {self.commands_log_file}")
 
-        with open(self.commands_file, 'w', encoding='utf-8') as f:
-            json.dump(command_data, f, indent=2)
+        # Retry for WSL/NTFS race condition (StarSteer may still be working with filesystem)
+        max_attempts = 5
+        for attempt in range(max_attempts):
+            try:
+                with open(self.commands_file, 'w', encoding='utf-8') as f:
+                    json.dump(command_data, f, indent=2)
+                break
+            except (FileNotFoundError, PermissionError, OSError) as e:
+                if attempt < max_attempts - 1:
+                    logger.warning(f"Retry {attempt + 1}/{max_attempts} writing commands.json: {e}")
+                    time.sleep(0.5)
+                else:
+                    raise
 
         # Wait for processing (file deleted) with heartbeat
         start_time = time.time()
@@ -643,19 +654,69 @@ class StarSteerSlicerOrchestrator:
             time.sleep(1)
 
     def _load_wells_config(self) -> List[Dict]:
-        """Load wells from wells_config_full.json with process=true"""
-        config_file = Path("wells_config_full.json")
+        """Load wells from wells_config.json in instance directory.
 
-        if not config_file.exists():
-            raise FileNotFoundError(f"Config not found: {config_file}")
+        If wells_config.json doesn't exist in instance dir, copy from master wells_config_full.json.
+        If FORCE_REPROCESS_ALL=true, reset all processed flags first.
+        """
+        # Instance-specific config in starsteer directory
+        instance_config = Path(self.starsteer_dir) / "wells_config.json"
+        master_config = Path("wells_config_full.json")
 
-        with open(config_file, 'r', encoding='utf-8') as f:
-            config = json.load(f)
+        if instance_config.exists():
+            self.config_file = instance_config
+            logger.info(f"Using instance config: {self.config_file}")
+        elif master_config.exists():
+            # Copy master to instance directory
+            import shutil
+            shutil.copy(master_config, instance_config)
+            self.config_file = instance_config
+            logger.info(f"Copied master config to instance: {self.config_file}")
+        else:
+            raise FileNotFoundError(f"No config found: {instance_config} or {master_config}")
 
-        all_wells = config.get("wells", [])
-        active_wells = [w for w in all_wells if w.get("process") == True]
+        with open(self.config_file, 'r', encoding='utf-8') as f:
+            self.wells_config = json.load(f)
+
+        all_wells = self.wells_config.get("wells", [])
+
+        # Check FORCE_REPROCESS_ALL flag
+        force_reprocess = os.getenv('FORCE_REPROCESS_ALL', 'false').lower() == 'true'
+        if force_reprocess:
+            logger.info("FORCE_REPROCESS_ALL=true: resetting all processed flags")
+            for well in all_wells:
+                well['processed'] = False
+            self._save_wells_config()
+
+        # Filter: process=true AND (processed!=true or missing)
+        active_wells = [
+            w for w in all_wells
+            if w.get("process") == True and w.get("processed") != True
+        ]
+
+        # Log stats
+        total = len(all_wells)
+        enabled = len([w for w in all_wells if w.get("process") == True])
+        already_done = len([w for w in all_wells if w.get("process") == True and w.get("processed") == True])
+        logger.info(f"Wells: {total} total, {enabled} enabled, {already_done} already processed, {len(active_wells)} to process")
 
         return active_wells
+
+    def _save_wells_config(self):
+        """Save wells config back to JSON file"""
+        with open(self.config_file, 'w', encoding='utf-8') as f:
+            json.dump(self.wells_config, f, indent=2, ensure_ascii=False)
+        logger.debug(f"Saved wells config to {self.config_file}")
+
+    def _mark_well_processed(self, well_name: str):
+        """Mark well as processed in config and save"""
+        for well in self.wells_config.get("wells", []):
+            if well.get("well_name") == well_name:
+                well["processed"] = True
+                self._save_wells_config()
+                logger.info(f"Marked {well_name} as processed")
+                return
+        logger.warning(f"Well {well_name} not found in config")
 
     def _load_wells_uuid_map(self) -> Dict[str, str]:
         """
@@ -826,6 +887,9 @@ class StarSteerSlicerOrchestrator:
                 # Run slicing loop (skip in debug mode - only INIT)
                 if not self.debug_mode:
                     self._run_slicing_loop(setup_data, TARGET_WELL_NAME, source_name)
+
+                    # Save NG_Interpretation to source well (if enabled)
+                    self._save_ng_interpretation_to_source_well(source_uuid, source_name, ref_interp_uuid)
                 else:
                     logger.info("DEBUG MODE - skipping slicing loop, only INIT done")
                     # Export interpretation to StarSteer after INIT
@@ -843,6 +907,9 @@ class StarSteerSlicerOrchestrator:
                 processed_count += 1
                 logger.info(f"✓ Completed: {source_name}")
 
+                # Mark well as processed in config (auto-save)
+                self._mark_well_processed(source_name)
+
             except Exception as e:
                 logger.error(f"Failed: {source_name}: {e}", exc_info=True)
                 # Save typewells_list.json for failed well (contains correct typewell/log)
@@ -855,7 +922,15 @@ class StarSteerSlicerOrchestrator:
                     import shutil
                     shutil.copy(typewells_file, save_path)
                     logger.info(f"Saved typewells config to: {save_path}")
-                raise  # Fall through - all wells should pass now
+                # Mark as error and continue to next well
+                for well in self.wells_config.get("wells", []):
+                    if well.get("well_name") == source_name:
+                        well["processed"] = True
+                        well["status"] = "error"
+                        well["error"] = str(e)
+                        break
+                self._save_wells_config()
+                continue  # Continue to next well instead of failing
 
         return processed_count
 
@@ -1359,7 +1434,7 @@ class StarSteerSlicerOrchestrator:
             TimeoutError: If fresh file doesn't appear within timeout
         """
         data_file_path = self.ag_data_dir / f"{well_name}.json"
-        check_interval = 0.5  # Check every 0.5 second
+        check_interval = 0.1  # Check every 0.1 second
         max_retries = 10  # Retry on race condition (atomic write: delete + rename)
 
         elapsed = 0
@@ -1496,7 +1571,10 @@ class StarSteerSlicerOrchestrator:
         executor = setup_data['executor']
 
         # Params - CLI argument overrides env var
-        slice_distance = float(os.getenv('SLICE_DISTANCE_METERS', '30.0'))
+        slice_distance_env = os.getenv('SLICE_DISTANCE_METERS')
+        if not slice_distance_env:
+            raise RuntimeError("SLICE_DISTANCE_METERS not set in .env - required parameter!")
+        slice_distance = float(slice_distance_env)
         max_iterations = _CLI_CONFIG.get('max_iterations') or int(os.getenv('MAX_SLICING_ITERATIONS', '1000'))
 
         # JSON path
@@ -1515,9 +1593,15 @@ class StarSteerSlicerOrchestrator:
             self._send_slice_command(slice_distance)
 
             # 1.5. CHECK if slice was successful and if well is complete
-            # StarSteer writes atomically, minimal delay for status update
-            time.sleep(0.1)
-            slice_status = self._check_slice_completion()
+            # Poll slicer_status until slice_count increments (10 retries, 0.03s interval)
+            expected_slice_count = iteration
+            for retry in range(10):
+                time.sleep(0.03)
+                slice_status = self._check_slice_completion()
+                if slice_status["slice_count"] >= expected_slice_count:
+                    break
+                if retry == 9:
+                    logger.warning(f"slice_count not updated after 10 retries (expected={expected_slice_count}, got={slice_status['slice_count']})")
 
             # Check if we've reached the end of the well
             if not slice_status["can_add_more"]:
@@ -1528,26 +1612,24 @@ class StarSteerSlicerOrchestrator:
                 logger.info("=" * 70)
                 break
 
-            if slice_status["remaining_md"] < slice_distance:
-                logger.info("=" * 70)
-                logger.info(f"✓ WELL COMPLETE: remaining MD ({slice_status['remaining_md']:.2f}m) < slice distance ({slice_distance}m)")
-                logger.info(f"  Total slices: {slice_status['slice_count']}")
-                logger.info("=" * 70)
-                break
+            # NOTE: Removed remaining_md <= 0 check and "Last slice" logging
+            # StarSteer should handle boundary cases - just trust can_add_more=False
+            # TODO: Investigate StarSteer remaining_md_meters calculation (see worksheet 2025-12-25)
 
             # 2. WAIT for JSON update (mtime change)
-            # Increased timeout to 300s (5 min) as StarSteer may take time to process slice
+            # Timeout 15s - if StarSteer doesn't respond, continue slicing until can_add_more=False
             try:
-                self._wait_for_fresh_data_file(target_well_name, old_mtime, timeout=300)
+                self._wait_for_fresh_data_file(target_well_name, old_mtime, timeout=15)
             except TimeoutError:
-                logger.warning("JSON not updated after 300s, checking if end of well...")
-                # Double-check with slicer_status before breaking
+                logger.warning("JSON not updated after 15s, checking slice status...")
                 slice_status = self._check_slice_completion()
                 if not slice_status["can_add_more"]:
                     logger.info("Confirmed: end of well (can_add_more=False)")
+                    break
                 else:
-                    logger.error("Timeout but can_add_more=True - possible issue!")
-                break
+                    # StarSteer didn't update JSON but well not complete - continue slicing
+                    logger.warning(f"Timeout but can_add_more=True (remaining={slice_status['remaining_md']:.2f}m) - continuing...")
+                    continue  # Skip processing, send next slice
 
             # 3. LOAD new data
             updated_data = self._load_well_json(target_well_name)
@@ -1799,6 +1881,116 @@ class StarSteerSlicerOrchestrator:
 
         return result
 
+    def _save_ng_interpretation_to_source_well(self, source_uuid: str, source_name: str, ref_interp_uuid: str):
+        """
+        Save NG_Interpretation to source (original) well after slicing.
+
+        Steps:
+        1. SELECT_WELL (source well)
+        2. COPY_INTERPRETATION (Manual -> NG_Interpretation)
+        3. SELECT_INTERPRETATION (NG_Interpretation)
+        4. START_AG
+        5. Rewrite interpretation.json to trigger QFileSystemWatcher
+
+        Args:
+            source_uuid: UUID of the source (original) well
+            source_name: Name of the source well
+            ref_interp_uuid: UUID of Manual interpretation on source well
+        """
+        # Check if enabled
+        save_enabled = os.getenv('SAVE_NG_INTERPRETATION', 'false').lower() == 'true'
+        if not save_enabled:
+            logger.info("SAVE_NG_INTERPRETATION disabled - skipping")
+            return
+
+        ng_interp_name = os.getenv('NG_INTERPRETATION_NAME', 'AI_Interpretation')
+        logger.info("=" * 70)
+        logger.info(f"SAVING {ng_interp_name} TO SOURCE WELL: {source_name}")
+        logger.info("=" * 70)
+
+        try:
+            # Step 0: STOP_AG on current (sliced) well
+            logger.info("Step 0: Stopping AG on sliced well")
+            self._send_command("STOP_AG", {}, timeout=30)
+            time.sleep(0.2)
+
+            # Step 1: SELECT_WELL (source well)
+            logger.info(f"Step 1: Switching to source well: {source_name}")
+            self._send_command("SELECT_WELL", {"wellUuid": source_uuid})
+            time.sleep(0.5)
+
+            # Step 2: COPY_INTERPRETATION (Manual -> NG_Interpretation)
+            logger.info(f"Step 2: Copying Manual -> {ng_interp_name}")
+            self._send_command("COPY_INTERPRETATION", {
+                "sourceInterpretationUuid": ref_interp_uuid,
+                "targetInterpretationName": ng_interp_name
+            })
+            time.sleep(0.5)
+
+            # Find NG_Interpretation UUID
+            interp_list_file = self.starsteer_dir / "interpretations_list.json"
+            with open(interp_list_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            ng_uuid = None
+            for interp in data.get("interpretations", []):
+                if interp.get("name") == ng_interp_name:
+                    ng_uuid = interp.get("uuid")
+                    break
+
+            if not ng_uuid:
+                logger.error(f"{ng_interp_name} not found after COPY_INTERPRETATION")
+                return
+
+            logger.info(f"✓ {ng_interp_name} created: {ng_uuid}")
+
+            # Step 3: SELECT_INTERPRETATION
+            logger.info(f"Step 3: Selecting {ng_interp_name}")
+            self._send_command("SELECT_INTERPRETATION", {"interpretationUuid": ng_uuid})
+            time.sleep(0.2)
+
+            # Step 3.5: Configure AG settings (useGridSlice: false for no grid)
+            logger.info("Step 3.5: Configuring AG settings (useGridSlice: false)")
+            ag_params_source = {
+                "useGridSlice": False,
+                "gridName": ""  # Explicitly empty grid
+            }
+            # Add dip range from .env if available
+            dip_range = os.getenv('DIP_ANGLE_RANGE_DEGREE')
+            if dip_range:
+                ag_params_source["dipRange"] = float(dip_range)
+            self._send_command("CONFIGURE_AG_SETTINGS", ag_params_source, timeout=60)
+
+            # Step 4: START_AG
+            logger.info("Step 4: Starting AG on source well")
+            self._send_command("START_AG", {}, timeout=60)
+
+            # Step 5: Rewrite interpretation.json to trigger QFileSystemWatcher
+            logger.info("Step 5: Triggering interpretation.json update")
+            interp_file = self.starsteer_dir / "interpretation.json"
+            if interp_file.exists():
+                # Read and rewrite (touch with content)
+                with open(interp_file, 'r', encoding='utf-8') as f:
+                    interp_data = json.load(f)
+                # Write back (triggers watcher)
+                tmp_file = self.starsteer_dir / "interpretation.json.tmp"
+                with open(tmp_file, 'w', encoding='utf-8') as f:
+                    json.dump(interp_data, f, indent=2, ensure_ascii=False)
+                tmp_file.replace(interp_file)
+                logger.info(f"✓ interpretation.json rewritten ({len(interp_data.get('interpretation', {}).get('segments', []))} segments)")
+            else:
+                logger.warning("interpretation.json not found - cannot trigger update")
+
+            logger.info(f"✓ {ng_interp_name} saved to {source_name}")
+
+            # Step 6: STOP_AG on source well (cleanup before next well)
+            logger.info("Step 6: Stopping AG on source well (cleanup)")
+            self._send_command("STOP_AG", {}, timeout=30)
+            time.sleep(0.2)
+
+        except Exception as e:
+            logger.error(f"Failed to save {ng_interp_name}: {e}", exc_info=True)
+
 
 def parse_args():
     """Parse command line arguments"""
@@ -1835,6 +2027,14 @@ Examples:
         help='Maximum slicing iterations (default: 1 for DE mode, 1000 for EXE mode)'
     )
 
+    parser.add_argument(
+        '--optimizer',
+        type=str,
+        default=None,
+        choices=['cmaes', 'montecarlo', 'snes', 'de'],
+        help='Optimizer algorithm (default: from GPU_ALGORITHM env, or cmaes). Options: cmaes, montecarlo, snes, de'
+    )
+
     return parser.parse_args()
 
 
@@ -1867,6 +2067,11 @@ def main():
         # EXE mode: use env setting for python_executor
         _CLI_CONFIG['max_iterations'] = args.max_iterations  # None = use env default (1000)
         logger.info("EXE MODE: C++ AutoGeosteering daemon")
+
+    # Override optimizer algorithm from CLI
+    if args.optimizer:
+        os.environ['GPU_ALGORITHM'] = args.optimizer.upper()
+        logger.info(f"Optimizer algorithm: {args.optimizer.upper()}")
 
     logger.info("Starting StarSteer Slicer Orchestrator")
 

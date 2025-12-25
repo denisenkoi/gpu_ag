@@ -660,6 +660,12 @@
       "grid_name": "EGFDL1_full",
       "enable_log_normalization": true,
       "process": false
+    },
+    {
+      "well_name": "Well1426~EGFDL",
+      "processed": true,
+      "status": "skipped",
+      "error": "segment.start_idx == segment.end_idx (zero-length segment)"
     }
   ],
   "output_format": "json",

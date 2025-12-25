@@ -25,6 +25,7 @@ from python_normalization.normalization_calculator import NormalizationCalculato
 from python_normalization.normalization_logger import NormalizationLogger
 from self_correlation.alternative_typewell_storage import AlternativeTypewellStorage
 from self_correlation.curve_replacement_processor import CurveReplacementProcessor
+from typewell_provider import TypewellProvider
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,9 @@ class WellProcessor:
         self._norm_coefs = None      # (multiplier, shift)
         self._cached_start_md = None # Fixed landing detection result
         self._cached_max_md = None   # Max MD from first calculation
+
+        # TypeWell provider for pseudo_stitched mode
+        self.typewell_provider = TypewellProvider()
 
         logger.info(f"WellProcessor initialized in {self.mode} mode")
             
@@ -247,7 +251,12 @@ class WellProcessor:
         
         # Step 6: Create executor
         executor = self._create_executor()
-        
+
+        # Step 6.5: Apply typewell transformation (pseudo_stitched mode)
+        if self.typewell_provider.mode != 'original':
+            self.typewell_provider.apply_to_well_data(well_data, initial_md)
+            logger.info(f"Applied typewell transformation: mode={self.typewell_provider.mode}, norm_coef={self.typewell_provider.norm_coef:.6f}")
+
         # Step 7: Prepare initial data slice
         initial_data = self.slicer.slice_well_data(well_data, initial_md)
         # NOTE: trim_interpretation_to_start_md removed - executor's _truncate_interpretation_at_md
@@ -436,10 +445,13 @@ class WellProcessor:
             shift = normalization_result['shift']
             self._norm_coefs = (multiplier, shift)
             logger.info(f"Cached normalization coefficients: multiplier={multiplier:.6f}, shift={shift:.6f}")
+            # Set normalization coef for typewell provider (inverted for typeLog)
+            self.typewell_provider.set_normalization_coef(multiplier)
         else:
             # No normalization
             self._norm_coefs = (1.0, 0.0)
             logger.warning(f"Normalization failed for {well_name}: {normalization_result['issue_description']}")
+            self.typewell_provider.reset_normalization_coef()
 
     def _apply_normalization(self, well_data: Dict[str, Any]) -> Dict[str, Any]:
         """Apply normalization using cached coefficients"""
