@@ -272,10 +272,10 @@ class StarSteerSlicerOrchestrator:
             # StarSteer is running - send CLOSE_APP
             logger.info(f"  StarSteer detected (status.json {age_seconds:.0f}s old), sending CLOSE_APP... (attempt {attempt + 1}/{max_retries})")
 
-            # Write CLOSE_APP command
+            # Write CLOSE_APP command (save_changes=False for online projects)
             command_data = {
                 "command": "CLOSE_APP",
-                "params": {"save_changes": True}
+                "params": {"save_changes": False}
             }
             with open(self.commands_file, 'w', encoding='utf-8') as f:
                 json.dump(command_data, f, indent=2)
@@ -382,10 +382,10 @@ class StarSteerSlicerOrchestrator:
 
         logger.info("  Closing StarSteer via CLOSE_APP command...")
 
-        # Write CLOSE_APP command
+        # Write CLOSE_APP command (save_changes=False for online projects)
         command_data = {
             "command": "CLOSE_APP",
-            "params": {"save_changes": True}
+            "params": {"save_changes": False}
         }
 
         with open(self.commands_file, 'w', encoding='utf-8') as f:
@@ -924,7 +924,7 @@ class StarSteerSlicerOrchestrator:
 
         Returns: Number of processed wells
         """
-        TARGET_WELL_NAME = "slicing_well"
+        TARGET_WELL_NAME = os.getenv("SLICING_WELL_NAME", "slicing_well")
         processed_count = 0
         total_wells = len(active_wells)
         retry_wells = []  # Wells to retry after timeout (max 1 retry)
@@ -2043,6 +2043,12 @@ class StarSteerSlicerOrchestrator:
         mse_p = os.getenv('PYTHON_MSE_POWER', '0.001')
         angle_p = os.getenv('PYTHON_ANGLE_SUM_POWER', '2.0')
         ng_interp_name = f"{ng_interp_base}_p{pearson_p}_m{mse_p}_a{angle_p}"
+
+        # Add extrapolate suffix if enabled (e.g. _ext5)
+        extrapolate = os.getenv('PYTHON_EXTRAPOLATE_ANGLE', 'false').lower() == 'true'
+        if extrapolate:
+            angle_range = os.getenv('PYTHON_ANGLE_RANGE', '10')
+            ng_interp_name = f"{ng_interp_name}_ext{angle_range}"
         logger.info("=" * 70)
         logger.info(f"SAVING {ng_interp_name} TO SOURCE WELL: {source_name}")
         logger.info("=" * 70)
