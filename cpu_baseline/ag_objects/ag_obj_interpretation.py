@@ -177,7 +177,21 @@ def create_segments(well,
                     segment_len,
                     start_idx,
                     start_shift,
-                    basic_segments=None):
+                    basic_segments=None,
+                    extrapolate_angle=None):
+    """
+    Create new segments for interpretation.
+
+    Args:
+        well: Well object
+        segments_count: Number of segments to create
+        segment_len: Length of each segment in indices
+        start_idx: Starting index
+        start_shift: Starting shift value
+        basic_segments: Existing segments to interpolate shifts from (optional)
+        extrapolate_angle: Angle in degrees to extrapolate for new segments (optional).
+                          If provided, end_shift = start_shift + tan(angle) * segment_vs_length
+    """
     if len(well.measured_depth) <= start_idx + segment_len:
         print('len(well.md) <= start_idx + segment_len')
     assert (len(well.measured_depth) > start_idx + segment_len)
@@ -199,8 +213,20 @@ def create_segments(well,
             # если есть интерпретированный сегмент, то получаем из него стартовый и конечные шифты
             segment_start_shift = start_shift if i == 0 else get_shift_by_idx(basic_segments, segment_start_idx)
             segment_end_shift = get_shift_by_idx(basic_segments, segment_end_idx)
+        elif extrapolate_angle is not None:
+            # Extrapolate angle from previous interpretation
+            # Each segment continues with the same angle
+            if i == 0:
+                segment_start_shift = start_shift
+            else:
+                # Continuation from previous segment
+                segment_start_shift = new_segments[-1].end_shift
+
+            # Calculate end_shift based on angle: tan(angle) = (end_shift - start_shift) / vs_length
+            segment_vs_length = well.vs_thl[segment_end_idx] - well.vs_thl[segment_start_idx]
+            segment_end_shift = segment_start_shift + math.tan(math.radians(extrapolate_angle)) * segment_vs_length
         else:
-            # Если сегменты не предоставлены, используется начальный сдвиг
+            # Если сегменты не предоставлены, используется начальный сдвиг (угол = 0)
             segment_start_shift = start_shift
             segment_end_shift = start_shift
 

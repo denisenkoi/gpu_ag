@@ -72,6 +72,10 @@ class PythonAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         self.min_pearson_value = float(os.getenv('PYTHON_MIN_PEARSON_VALUE', '-1.0'))
         self.use_accumulative_bounds = os.getenv('PYTHON_USE_ACCUMULATIVE_BOUNDS', 'true').lower() == 'true'
 
+        # Angle extrapolation for new segments
+        self.extrapolate_angle_enabled = os.getenv('PYTHON_EXTRAPOLATE_ANGLE', 'false').lower() == 'true'
+        self.extrapolate_lookback = float(os.getenv('PYTHON_EXTRAPOLATE_LOOKBACK', '200.0'))
+
         # State management - ONE full interpretation (all segments, normalized)
         self.interpretation = None  # List[Segment] - FULL interpretation
         self.ag_well = None
@@ -89,6 +93,8 @@ class PythonAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         logger.info(f"Python executor initialized: segments={self.segments_count}, "
                     f"lookback={self.lookback_distance}m, max_segment={self.max_segment_length}m, "
                     f"method={self.optimizer_method}")
+        if self.extrapolate_angle_enabled:
+            logger.info(f"  Angle extrapolation ENABLED (lookback={self.extrapolate_lookback}m)")
 
     def start_daemon(self):
         """Start Python executor (no actual daemon needed)"""
@@ -231,6 +237,56 @@ class PythonAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                      f"{len(new_interpretation)} segments remain, stitch_shift={stitch_shift:.6f}")
         return stitch_shift
 
+    def _calculate_extrapolate_angle(self, well: Well) -> float:
+        """
+        Calculate average angle from last segments of interpretation for extrapolation.
+
+        Uses weighted average by segment length from last extrapolate_lookback meters.
+
+        Returns:
+            Average angle in degrees, or 0.0 if no segments available
+        """
+        if not self.interpretation:
+            return 0.0
+
+        # Calculate lookback distance in normalized units
+        lookback_normalized = self.extrapolate_lookback / self.fixed_md_range
+
+        # Find segments within lookback distance from the end
+        last_segment = self.interpretation[-1]
+        lookback_start_vs = last_segment.end_vs - lookback_normalized
+
+        lookback_segments = []
+        for seg in reversed(self.interpretation):
+            if seg.end_vs >= lookback_start_vs:
+                lookback_segments.append(seg)
+            else:
+                # Include partial overlap
+                if seg.start_vs < lookback_start_vs < seg.end_vs:
+                    lookback_segments.append(seg)
+                break
+
+        if not lookback_segments:
+            return 0.0
+
+        # Calculate weighted average angle
+        total_angle_weighted = 0.0
+        total_length = 0.0
+
+        for seg in lookback_segments:
+            seg_length = seg.end_vs - seg.start_vs
+            if seg_length > 0:
+                total_angle_weighted += seg.angle * seg_length
+                total_length += seg_length
+
+        if total_length <= 0:
+            return 0.0
+
+        avg_angle = total_angle_weighted / total_length
+        logger.debug(f"Extrapolate angle: {avg_angle:.2f}° from {len(lookback_segments)} segments "
+                    f"({self.extrapolate_lookback:.0f}m lookback)")
+        return avg_angle
+
     def _create_and_append_segments(self, start_idx: int, end_idx: int,
                                      start_shift: float, well: Well) -> int:
         """Create new segments and append to self.interpretation
@@ -260,13 +316,19 @@ class PythonAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
 
         segment_length_idx = new_length_idx // actual_count
 
+        # Calculate extrapolate angle if enabled
+        extrapolate_angle = None
+        if self.extrapolate_angle_enabled:
+            extrapolate_angle = self._calculate_extrapolate_angle(well)
+
         # Create new segments
         new_segments = create_segments(
             well=well,
             segments_count=actual_count,
             segment_len=segment_length_idx,
             start_idx=start_idx,
-            start_shift=start_shift
+            start_shift=start_shift,
+            extrapolate_angle=extrapolate_angle
         )
 
         # Append to interpretation
@@ -581,22 +643,15 @@ class PythonAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                                  num_points: int):
         """Log optimization result to statistics"""
 
-        # Extract optimization stats from first result
+        # Extract optimization stats from optimizer (contains final_fun, elapsed_time_sec, etc.)
         best_result = optimization_results[0]
         optimized_well = best_result[6]  # The well object with optimization stats
 
-        optimization_stats = {
-            'method': self.optimizer_method,
-            'segments_count': self.segments_count,
-            'n_iterations': self.num_iterations,
-            'final_correlation': correlation,
-            'pearson_correlation': pearson,
-            'mse_value': mse,
-            'self_correlation': self_correlation,
-            'intersections_count': getattr(optimized_well, 'intersections_count', 0),
-            'success': True,  # Python optimization always succeeds or throws
-            'n_function_evaluations': self.num_iterations  # Approximation
-        }
+        # Use stats from optimizer, add elapsed_time alias for logger compatibility
+        optimization_stats = getattr(optimized_well, 'optimization_stats', {})
+        optimization_stats['elapsed_time'] = optimization_stats.get('elapsed_time_sec', 0)
+        optimization_stats['pearson'] = pearson
+        optimization_stats['mse'] = mse
 
         optimization_result = {
             'well_name': self.well_name,
