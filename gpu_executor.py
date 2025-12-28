@@ -877,11 +877,13 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
 
         manual_segments_json = well_data.get('interpretation', {}).get('segments', [])
 
-        # Store reference interpretation for comparison
-        self.reference_segments = well_data.get('referenceInterpretation', {}).get('segments', [])
+        # Store reference interpretation for comparison (handle None values)
+        ref_interp = well_data.get('referenceInterpretation') or {}
+        self.reference_segments = ref_interp.get('segments', [])
         if not self.reference_segments:
-            self.reference_segments = well_data.get('starredInterpretation', {}).get('segments', [])
-        logger.debug(f"Reference interpretation: {len(self.reference_segments)} segments")
+            logger.warning("No reference interpretation segments found - quality metrics unavailable")
+        else:
+            logger.debug(f"Reference interpretation: {len(self.reference_segments)} segments")
 
         # Calculate fixed planning horizon
         self.fixed_min_md = self.ag_well.min_md
