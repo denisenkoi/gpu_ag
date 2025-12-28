@@ -860,6 +860,11 @@ class StarSteerSlicerOrchestrator:
                     logger.info("Step 4: Configuring AG config file...")
                     self._configure_ag_config(TARGET_WELL_NAME, ref_interp_uuid)
 
+                    # DEBUG: Log all reference UUIDs to separate file for race condition analysis
+                    import datetime
+                    with open(Path(self.starsteer_dir) / "reference_uuid_log.txt", "a") as uuid_log:
+                        uuid_log.write(f"{datetime.datetime.now().isoformat()} | {source_name} | source_uuid={source_uuid} | ref_interp_uuid={ref_interp_uuid}\n")
+
                     # Step 5: Configure AG settings (triggers ag_config.json reload)
                     logger.info("Step 5: Configuring AG settings...")
                     self._configure_ag_settings(well_info, landing_end_md)
@@ -1734,6 +1739,17 @@ class StarSteerSlicerOrchestrator:
         logger.info("=" * 70)
         logger.info(f"SLICING LOOP DONE: {source_well_name} ({iteration} iterations)")
         logger.info("=" * 70)
+
+        # Compute endpoint delta at lateralWellLastMD (last point of trajectory)
+        lateral_last_md = updated_data.get('lateralWellLastMD')
+        if lateral_last_md and interpretation_data:
+            starsteer_segments = self._get_reference_interpretation(updated_data, iteration)
+            python_segments = interpretation_data['interpretation']['segments']
+            endpoint_data = self.quality_analyzer.compute_endpoint_delta(
+                starsteer_segments, python_segments, lateral_last_md, source_well_name
+            )
+            if endpoint_data:
+                self.quality_analyzer.log_endpoint_delta(endpoint_data, source_well_name)
 
     def _validate_auto_interpretation(self, well_data: Dict[str, Any], iteration: int):
         """

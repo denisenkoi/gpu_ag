@@ -237,3 +237,162 @@ class SlicerQualityAnalyzer:
                     f"  Threshold {threshold:.1f}m exceeded! "
                     f"Coverage: {coverage:.1f}%"
                 )
+
+    def compute_endpoint_delta(
+        self,
+        reference_segments: List[Dict[str, float]],
+        computed_segments: List[Dict[str, float]],
+        lateral_last_md: float,
+        well_name: str
+    ) -> Optional[Dict[str, float]]:
+        """
+        Compute endpoint delta between reference and computed interpretations
+        at lateralWellLastMD (last point of trajectory).
+
+        Args:
+            reference_segments: Reference interpretation segments (from StarSteer)
+            computed_segments: Computed interpretation segments (from Python)
+            lateral_last_md: Last MD of lateral trajectory (lateralWellLastMD field)
+            well_name: Well name for logging
+
+        Returns:
+            Dict with endpoint_md, ref_shift, our_shift, delta or None if can't compute
+        """
+        if not reference_segments or not computed_segments:
+            logger.warning(f"Cannot compute endpoint delta for {well_name}: missing segments")
+            return None
+
+        if lateral_last_md is None:
+            logger.warning(f"Cannot compute endpoint delta for {well_name}: lateralWellLastMD is None")
+            return None
+
+        # Interpolate shift at lateral_last_md for both interpretations
+        ref_shift = self._interpolate_shift_at_md(reference_segments, lateral_last_md)
+        our_shift = self._interpolate_shift_at_md(computed_segments, lateral_last_md)
+
+        if ref_shift is None:
+            logger.warning(f"Cannot interpolate ref_shift at MD={lateral_last_md:.1f}m for {well_name}")
+            return None
+
+        if our_shift is None:
+            logger.warning(f"Cannot interpolate our_shift at MD={lateral_last_md:.1f}m for {well_name}")
+            return None
+
+        delta = abs(our_shift - ref_shift)
+
+        result = {
+            'endpoint_md': lateral_last_md,
+            'ref_shift': ref_shift,
+            'our_shift': our_shift,
+            'endpoint_delta': delta
+        }
+
+        logger.info(f"Endpoint delta for {well_name}: MD={lateral_last_md:.1f}m, "
+                   f"ref={ref_shift:.2f}m, our={our_shift:.2f}m, delta={delta:.2f}m")
+
+        return result
+
+    def _interpolate_shift_at_md(
+        self,
+        segments: List[Dict[str, float]],
+        target_md: float
+    ) -> Optional[float]:
+        """
+        Interpolate shift value at target MD from segments.
+
+        Segments can have different formats:
+        - mdStart/mdEnd with shiftStart/shiftEnd
+        - startMd/endMd with startShift/endShift
+
+        Args:
+            segments: List of interpretation segments
+            target_md: Target MD to interpolate at
+
+        Returns:
+            Interpolated shift value or None
+        """
+        if not segments:
+            return None
+
+        for seg in segments:
+            # Handle different segment formats
+            if 'mdStart' in seg:
+                start_md = seg.get('mdStart')
+                end_md = seg.get('mdEnd')
+                start_shift = seg.get('shiftStart')
+                end_shift = seg.get('shiftEnd')
+            elif 'startMd' in seg:
+                start_md = seg.get('startMd')
+                end_md = seg.get('endMd')
+                start_shift = seg.get('startShift')
+                end_shift = seg.get('endShift')
+            else:
+                continue
+
+            if start_md is None or end_md is None:
+                continue
+
+            # Check if target_md is in this segment
+            if start_md <= target_md <= end_md:
+                if start_shift is None or end_shift is None:
+                    # Segment covers MD but no shift data
+                    continue
+
+                # Linear interpolation
+                if end_md == start_md:
+                    return start_shift
+                ratio = (target_md - start_md) / (end_md - start_md)
+                return start_shift + ratio * (end_shift - start_shift)
+
+        # target_md not found in any segment - try extrapolation from last segment
+        if segments:
+            last_seg = segments[-1]
+            if 'mdStart' in last_seg:
+                end_md = last_seg.get('mdEnd')
+                end_shift = last_seg.get('shiftEnd')
+            elif 'startMd' in last_seg:
+                end_md = last_seg.get('endMd')
+                end_shift = last_seg.get('endShift')
+            else:
+                return None
+
+            if end_md and target_md > end_md and end_shift is not None:
+                # Extrapolate: use last shift (flat extrapolation)
+                logger.debug(f"Extrapolating shift at MD={target_md:.1f}m from last segment ending at {end_md:.1f}m")
+                return end_shift
+
+        return None
+
+    def log_endpoint_delta(self, endpoint_data: Dict[str, float], well_name: str):
+        """
+        Log endpoint delta to CSV and console.
+
+        Args:
+            endpoint_data: Dict from compute_endpoint_delta
+            well_name: Well name
+        """
+        if not endpoint_data:
+            return
+
+        # Log to console
+        logger.info(
+            f"  Endpoint @ MD={endpoint_data['endpoint_md']:.1f}m: "
+            f"delta={endpoint_data['endpoint_delta']:.2f}m "
+            f"(ref={endpoint_data['ref_shift']:.2f}m, our={endpoint_data['our_shift']:.2f}m)"
+        )
+
+        # Append to separate endpoint CSV
+        endpoint_csv = self.csv_path.parent / "endpoint_delta_results.csv"
+
+        # Check if file exists to write header
+        write_header = not endpoint_csv.exists()
+
+        with open(endpoint_csv, 'a', newline='', encoding='utf-8') as f:
+            fieldnames = ['well_name', 'endpoint_md', 'ref_shift', 'our_shift', 'endpoint_delta']
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if write_header:
+                writer.writeheader()
+            writer.writerow({
+                'well_name': well_name,
+                **endpoint_data
+            })
