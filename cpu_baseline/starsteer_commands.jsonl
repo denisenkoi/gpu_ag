@@ -1,8 +1,113 @@
-{"timestamp": 1765747196.6656594, "datetime": "2025-12-15 00:19:56", "command": "OPEN_PROJECT", "params": {"projectName": "EF_AG_anonym_automation_local"}}
-{"timestamp": 1765747224.6872947, "datetime": "2025-12-15 00:20:24", "command": "SELECT_WELL", "params": {"wellUuid": "{d00e7d35-4848-4242-b6a9-448b838f8e14}"}}
-{"timestamp": 1765747231.694197, "datetime": "2025-12-15 00:20:31", "command": "INIT_WELL_SLICER", "params": {"sourceWellUuid": "{d00e7d35-4848-4242-b6a9-448b838f8e14}", "targetWellName": "slicing_well", "cutoffMD": 0, "additionalMD": 90.0}}
-{"timestamp": 1765747240.6996536, "datetime": "2025-12-15 00:20:40", "command": "SELECT_WELL", "params": {"wellUuid": "{5f51e280-2649-4375-9cb6-c8214382ca2e}"}}
-{"timestamp": 1765747251.7083998, "datetime": "2025-12-15 00:20:51", "command": "COPY_INTERPRETATION", "params": {"sourceInterpretationUuid": "{3b9c7545-22e9-4445-b899-65a1d564c77e}", "targetInterpretationName": "Assisted"}}
-{"timestamp": 1765747261.7136168, "datetime": "2025-12-15 00:21:01", "command": "SELECT_INTERPRETATION", "params": {"interpretationUuid": "{4cad408a-0b6b-49ee-bdff-e7ca9d081fc1}"}}
-{"timestamp": 1765747270.7218807, "datetime": "2025-12-15 00:21:10", "command": "CONFIGURE_AG_SETTINGS", "params": {"dipRange": 2.0, "agStartMD": 3899.9999999999995, "logName": "GR_fix", "typelogWellName": "Well744", "typelogName": "BRYSCH-JONAS UNIT C 5H 90.0 DL GR", "horizonSmoothness": 3.0, "gridName": "EGFDL1_full"}}
-{"timestamp": 1765747278.7264843, "datetime": "2025-12-15 00:21:18", "command": "START_AG", "params": {}}
+{"timestamp": 1766931942.4371097, "datetime": "2025-12-28 17:25:42", "command": "OPEN_PROJECT", "params": {"projectName": "Cleaned_wells_small_subset_local"}}
+{"timestamp": 1766931952.5403316, "datetime": "2025-12-28 17:25:52", "command": "SELECT_WELL", "params": {"wellUuid": "{83de2fb8-d6e9-44ca-b97d-d220f18a2cb2}"}}
+{"timestamp": 1766931955.6104946, "datetime": "2025-12-28 17:25:55", "command": "INIT_WELL_SLICER", "params": {"sourceWellUuid": "{83de2fb8-d6e9-44ca-b97d-d220f18a2cb2}", "targetWellName": "slicing_well", "cutoffMD": 0, "additionalMD": 90.0}}
+{"timestamp": 1766931958.6728632, "datetime": "2025-12-28 17:25:58", "command": "SELECT_WELL", "params": {"wellUuid": "{4f392a4b-c4ee-43da-8863-0b693ffaa9a1}"}}
+{"timestamp": 1766931961.722502, "datetime": "2025-12-28 17:26:01", "command": "COPY_INTERPRETATION", "params": {"sourceInterpretationUuid": "{15d8520a-dfb0-4894-90ac-922951d907a0}", "targetInterpretationName": "Assisted"}}
+{"timestamp": 1766931965.7576783, "datetime": "2025-12-28 17:26:05", "command": "SELECT_INTERPRETATION", "params": {"interpretationUuid": "{c8d5e6a1-1f71-4c16-92d9-2e0167b05659}"}}
+{"timestamp": 1766931968.7973242, "datetime": "2025-12-28 17:26:08", "command": "CONFIGURE_AG_SETTINGS", "params": {"dipRange": 5.0, "agStartMD": 3849.9999999999995, "logName": "GR", "typelogWellName": "Well2004", "typelogName": "GR", "horizonSmoothness": 3.0, "gridName": "EGFDL1_full", "pseudoLogEndMd": 3649.9999999999995}}
+{"timestamp": 1766931970.8542774, "datetime": "2025-12-28 17:26:10", "command": "START_AG", "params": {}}
+{"timestamp": 1766932204.2318397, "datetime": "2025-12-28 17:30:04", "command": "SELECT_WELL", "params": {"wellUuid": "{97689917-f036-45d9-bee4-2ce87e0a1c81}"}}
+{"timestamp": 1766932207.3042336, "datetime": "2025-12-28 17:30:07", "command": "INIT_WELL_SLICER", "params": {"sourceWellUuid": "{97689917-f036-45d9-bee4-2ce87e0a1c81}", "targetWellName": "slicing_well", "cutoffMD": 0, "additionalMD": 90.0}}
+{"timestamp": 1766932210.355445, "datetime": "2025-12-28 17:30:10", "command": "SELECT_WELL", "params": {"wellUuid": "{3b544c74-5050-4874-8c46-dfca209f46f6}"}}
+{"timestamp": 1766932213.3828619, "datetime": "2025-12-28 17:30:13", "command": "COPY_INTERPRETATION", "params": {"sourceInterpretationUuid": "{b341994b-3bab-4901-9d42-04b96139eb7a}", "targetInterpretationName": "Assisted"}}
+{"timestamp": 1766932217.4428904, "datetime": "2025-12-28 17:30:17", "command": "SELECT_INTERPRETATION", "params": {"interpretationUuid": "{491c6674-4d0e-469e-b77c-5e873a7fcc4d}"}}
+{"timestamp": 1766932220.4948845, "datetime": "2025-12-28 17:30:20", "command": "CONFIGURE_AG_SETTINGS", "params": {"dipRange": 5.0, "agStartMD": 3835.0, "logName": "GR", "typelogWellName": "Well2004", "typelogName": "GR", "horizonSmoothness": 3.0, "gridName": "EGFDL1_full", "pseudoLogEndMd": 3635.0}}
+{"timestamp": 1766932222.5267117, "datetime": "2025-12-28 17:30:22", "command": "START_AG", "params": {}}
+{"timestamp": 1766932405.3584971, "datetime": "2025-12-28 17:33:25", "command": "SELECT_WELL", "params": {"wellUuid": "{fe229ba0-8e3c-44a8-86a1-77b9c4e5dfb5}"}}
+{"timestamp": 1766932408.3757803, "datetime": "2025-12-28 17:33:28", "command": "INIT_WELL_SLICER", "params": {"sourceWellUuid": "{fe229ba0-8e3c-44a8-86a1-77b9c4e5dfb5}", "targetWellName": "slicing_well", "cutoffMD": 0, "additionalMD": 90.0}}
+{"timestamp": 1766932411.4266953, "datetime": "2025-12-28 17:33:31", "command": "SELECT_WELL", "params": {"wellUuid": "{110a904c-1089-4c12-93cb-65e50977305c}"}}
+{"timestamp": 1766932414.4597356, "datetime": "2025-12-28 17:33:34", "command": "COPY_INTERPRETATION", "params": {"sourceInterpretationUuid": "{72c76dfb-4e12-41b3-b631-6538ac589e63}", "targetInterpretationName": "Assisted"}}
+{"timestamp": 1766932418.494072, "datetime": "2025-12-28 17:33:38", "command": "SELECT_INTERPRETATION", "params": {"interpretationUuid": "{cbffbadd-34a1-4aee-9562-0d2ded3a0a10}"}}
+{"timestamp": 1766932421.5223722, "datetime": "2025-12-28 17:33:41", "command": "CONFIGURE_AG_SETTINGS", "params": {"dipRange": 5.0, "agStartMD": 3824.9999999999995, "logName": "GR", "typelogWellName": "Well2004", "typelogName": "GR", "horizonSmoothness": 3.0, "gridName": "EGFDL1_full", "pseudoLogEndMd": 3624.9999999999995}}
+{"timestamp": 1766932423.5898159, "datetime": "2025-12-28 17:33:43", "command": "START_AG", "params": {}}
+{"timestamp": 1766932564.7121625, "datetime": "2025-12-28 17:36:04", "command": "SELECT_WELL", "params": {"wellUuid": "{62da9829-5d23-4942-9a68-f34e0c03c91c}"}}
+{"timestamp": 1766932567.7832875, "datetime": "2025-12-28 17:36:07", "command": "INIT_WELL_SLICER", "params": {"sourceWellUuid": "{62da9829-5d23-4942-9a68-f34e0c03c91c}", "targetWellName": "slicing_well", "cutoffMD": 0, "additionalMD": 90.0}}
+{"timestamp": 1766932570.8592436, "datetime": "2025-12-28 17:36:10", "command": "SELECT_WELL", "params": {"wellUuid": "{d47ae93b-b5c8-4bd9-ab57-bc4ceabcb78c}"}}
+{"timestamp": 1766932573.9219222, "datetime": "2025-12-28 17:36:13", "command": "COPY_INTERPRETATION", "params": {"sourceInterpretationUuid": "{5183e83a-4fea-46d3-9e09-4f27e0c9212f}", "targetInterpretationName": "Assisted"}}
+{"timestamp": 1766932577.9642248, "datetime": "2025-12-28 17:36:17", "command": "SELECT_INTERPRETATION", "params": {"interpretationUuid": "{30a16a18-0269-4f00-b47b-15e4070519cb}"}}
+{"timestamp": 1766932580.9786859, "datetime": "2025-12-28 17:36:20", "command": "CONFIGURE_AG_SETTINGS", "params": {"dipRange": 5.0, "agStartMD": 3845.0, "logName": "GR", "typelogWellName": "Well2004", "typelogName": "GR", "horizonSmoothness": 3.0, "gridName": "EGFDL1_full", "pseudoLogEndMd": 3645.0}}
+{"timestamp": 1766932583.01241, "datetime": "2025-12-28 17:36:23", "command": "START_AG", "params": {}}
+{"timestamp": 1766932747.4860346, "datetime": "2025-12-28 17:39:07", "command": "SELECT_WELL", "params": {"wellUuid": "{b42ca115-96b3-4b93-a32e-0d4c1e79778b}"}}
+{"timestamp": 1766932750.5098314, "datetime": "2025-12-28 17:39:10", "command": "INIT_WELL_SLICER", "params": {"sourceWellUuid": "{b42ca115-96b3-4b93-a32e-0d4c1e79778b}", "targetWellName": "slicing_well", "cutoffMD": 0, "additionalMD": 90.0}}
+{"timestamp": 1766932753.5232327, "datetime": "2025-12-28 17:39:13", "command": "SELECT_WELL", "params": {"wellUuid": "{c5161819-e9e9-4491-9387-8849f3760a6b}"}}
+{"timestamp": 1766932756.6131558, "datetime": "2025-12-28 17:39:16", "command": "COPY_INTERPRETATION", "params": {"sourceInterpretationUuid": "{1c720927-0f5d-48fe-8d75-810011cf087a}", "targetInterpretationName": "Assisted"}}
+{"timestamp": 1766932760.710653, "datetime": "2025-12-28 17:39:20", "command": "SELECT_INTERPRETATION", "params": {"interpretationUuid": "{37335b3e-b287-422e-8c4a-caf9a53512e3}"}}
+{"timestamp": 1766932763.786304, "datetime": "2025-12-28 17:39:23", "command": "CONFIGURE_AG_SETTINGS", "params": {"dipRange": 5.0, "agStartMD": 3835.0, "logName": "GR", "typelogWellName": "Well2004", "typelogName": "GR", "horizonSmoothness": 3.0, "gridName": "EGFDL1_full", "pseudoLogEndMd": 3635.0}}
+{"timestamp": 1766932765.8104694, "datetime": "2025-12-28 17:39:25", "command": "START_AG", "params": {}}
+{"timestamp": 1766932883.720531, "datetime": "2025-12-28 17:41:23", "command": "SELECT_WELL", "params": {"wellUuid": "{29d13acd-a798-4dd3-909f-b3810c056696}"}}
+{"timestamp": 1766932886.8174522, "datetime": "2025-12-28 17:41:26", "command": "INIT_WELL_SLICER", "params": {"sourceWellUuid": "{29d13acd-a798-4dd3-909f-b3810c056696}", "targetWellName": "slicing_well", "cutoffMD": 0, "additionalMD": 90.0}}
+{"timestamp": 1766932889.857936, "datetime": "2025-12-28 17:41:29", "command": "SELECT_WELL", "params": {"wellUuid": "{18391680-719b-4186-9972-4bc289da4fb2}"}}
+{"timestamp": 1766932892.8890374, "datetime": "2025-12-28 17:41:32", "command": "COPY_INTERPRETATION", "params": {"sourceInterpretationUuid": "{ff1c0470-4378-4831-b584-e6f54d7463bb}", "targetInterpretationName": "Assisted"}}
+{"timestamp": 1766932896.9465663, "datetime": "2025-12-28 17:41:36", "command": "SELECT_INTERPRETATION", "params": {"interpretationUuid": "{72703bbb-518f-4f14-b6d0-88644c3535d3}"}}
+{"timestamp": 1766932899.977209, "datetime": "2025-12-28 17:41:39", "command": "CONFIGURE_AG_SETTINGS", "params": {"dipRange": 5.0, "agStartMD": 3835.0, "logName": "GR", "typelogWellName": "Well2004", "typelogName": "GR", "horizonSmoothness": 3.0, "gridName": "EGFDL1_full", "pseudoLogEndMd": 3635.0}}
+{"timestamp": 1766932902.0169628, "datetime": "2025-12-28 17:41:42", "command": "START_AG", "params": {}}
+{"timestamp": 1766933020.032438, "datetime": "2025-12-28 17:43:40", "command": "SELECT_WELL", "params": {"wellUuid": "{00076a7d-7ac9-438e-b837-fd1c0e6a8b7a}"}}
+{"timestamp": 1766933023.0894382, "datetime": "2025-12-28 17:43:43", "command": "INIT_WELL_SLICER", "params": {"sourceWellUuid": "{00076a7d-7ac9-438e-b837-fd1c0e6a8b7a}", "targetWellName": "slicing_well", "cutoffMD": 0, "additionalMD": 90.0}}
+{"timestamp": 1766933026.1639135, "datetime": "2025-12-28 17:43:46", "command": "SELECT_WELL", "params": {"wellUuid": "{001b177e-20e5-48c8-ba5a-7b1d7cbdbdf6}"}}
+{"timestamp": 1766933029.2012062, "datetime": "2025-12-28 17:43:49", "command": "COPY_INTERPRETATION", "params": {"sourceInterpretationUuid": "{a9ce5af8-b892-4666-ae9c-78ea9a7fdee3}", "targetInterpretationName": "Assisted"}}
+{"timestamp": 1766933033.2217224, "datetime": "2025-12-28 17:43:53", "command": "SELECT_INTERPRETATION", "params": {"interpretationUuid": "{85a66078-0b53-4c9d-8bb7-1fe52918449b}"}}
+{"timestamp": 1766933036.2715974, "datetime": "2025-12-28 17:43:56", "command": "CONFIGURE_AG_SETTINGS", "params": {"dipRange": 5.0, "agStartMD": 3855.0, "logName": "GR", "typelogWellName": "Well2004", "typelogName": "GR", "horizonSmoothness": 3.0, "gridName": "EGFDL1_full", "pseudoLogEndMd": 3655.0}}
+{"timestamp": 1766933038.3136299, "datetime": "2025-12-28 17:43:58", "command": "START_AG", "params": {}}
+{"timestamp": 1766933166.2214942, "datetime": "2025-12-28 17:46:06", "command": "SELECT_WELL", "params": {"wellUuid": "{c7716903-2646-4e22-8213-e61d8bdefe13}"}}
+{"timestamp": 1766933169.238505, "datetime": "2025-12-28 17:46:09", "command": "INIT_WELL_SLICER", "params": {"sourceWellUuid": "{c7716903-2646-4e22-8213-e61d8bdefe13}", "targetWellName": "slicing_well", "cutoffMD": 0, "additionalMD": 90.0}}
+{"timestamp": 1766933172.2697327, "datetime": "2025-12-28 17:46:12", "command": "SELECT_WELL", "params": {"wellUuid": "{d35b5ff7-4384-41b9-90ce-26e898012378}"}}
+{"timestamp": 1766933175.3191385, "datetime": "2025-12-28 17:46:15", "command": "COPY_INTERPRETATION", "params": {"sourceInterpretationUuid": "{65cb903a-8e09-4175-b09e-c13bd43ddcbe}", "targetInterpretationName": "Assisted"}}
+{"timestamp": 1766933179.346839, "datetime": "2025-12-28 17:46:19", "command": "SELECT_INTERPRETATION", "params": {"interpretationUuid": "{6fc9f08e-41f4-49cb-bcb9-f776482ce11a}"}}
+{"timestamp": 1766933182.379892, "datetime": "2025-12-28 17:46:22", "command": "CONFIGURE_AG_SETTINGS", "params": {"dipRange": 5.0, "agStartMD": 3824.9999999999995, "logName": "GR", "typelogWellName": "Well2004", "typelogName": "GR", "horizonSmoothness": 3.0, "gridName": "EGFDL1_full", "pseudoLogEndMd": 3624.9999999999995}}
+{"timestamp": 1766933184.4141955, "datetime": "2025-12-28 17:46:24", "command": "START_AG", "params": {}}
+{"timestamp": 1766933331.9972017, "datetime": "2025-12-28 17:48:51", "command": "SELECT_WELL", "params": {"wellUuid": "{5043ca88-7fed-403f-9bb9-a3247d88ea7d}"}}
+{"timestamp": 1766933335.0487106, "datetime": "2025-12-28 17:48:55", "command": "INIT_WELL_SLICER", "params": {"sourceWellUuid": "{5043ca88-7fed-403f-9bb9-a3247d88ea7d}", "targetWellName": "slicing_well", "cutoffMD": 0, "additionalMD": 90.0}}
+{"timestamp": 1766933338.126418, "datetime": "2025-12-28 17:48:58", "command": "SELECT_WELL", "params": {"wellUuid": "{13625a7c-9d94-465d-aa59-6cf7ae4b095f}"}}
+{"timestamp": 1766933341.154063, "datetime": "2025-12-28 17:49:01", "command": "COPY_INTERPRETATION", "params": {"sourceInterpretationUuid": "{a74a3d3c-d3e2-41c5-8a35-9525f14737f7}", "targetInterpretationName": "Assisted"}}
+{"timestamp": 1766933345.2031868, "datetime": "2025-12-28 17:49:05", "command": "SELECT_INTERPRETATION", "params": {"interpretationUuid": "{fc28ee7f-9c7c-4f78-8fcf-ec884369a7c9}"}}
+{"timestamp": 1766933348.2266626, "datetime": "2025-12-28 17:49:08", "command": "CONFIGURE_AG_SETTINGS", "params": {"dipRange": 5.0, "agStartMD": 3845.0, "logName": "GR", "typelogWellName": "Well2004", "typelogName": "GR", "horizonSmoothness": 3.0, "gridName": "EGFDL1_full", "pseudoLogEndMd": 3645.0}}
+{"timestamp": 1766933350.2612176, "datetime": "2025-12-28 17:49:10", "command": "START_AG", "params": {}}
+{"timestamp": 1766933471.9130635, "datetime": "2025-12-28 17:51:11", "command": "SELECT_WELL", "params": {"wellUuid": "{b344bcef-9faf-49c2-9467-5dedb8deee6a}"}}
+{"timestamp": 1766933474.9885576, "datetime": "2025-12-28 17:51:14", "command": "INIT_WELL_SLICER", "params": {"sourceWellUuid": "{b344bcef-9faf-49c2-9467-5dedb8deee6a}", "targetWellName": "slicing_well", "cutoffMD": 0, "additionalMD": 90.0}}
+{"timestamp": 1766933478.065024, "datetime": "2025-12-28 17:51:18", "command": "SELECT_WELL", "params": {"wellUuid": "{1d30dd0f-5295-4b77-a4ec-7608f1483888}"}}
+{"timestamp": 1766933481.118014, "datetime": "2025-12-28 17:51:21", "command": "COPY_INTERPRETATION", "params": {"sourceInterpretationUuid": "{5730adc8-7dff-403b-8f6f-8af4f8ccb829}", "targetInterpretationName": "Assisted"}}
+{"timestamp": 1766933485.135689, "datetime": "2025-12-28 17:51:25", "command": "SELECT_INTERPRETATION", "params": {"interpretationUuid": "{cacf2289-9957-4002-b3d8-265d2a2f9d35}"}}
+{"timestamp": 1766933488.1671097, "datetime": "2025-12-28 17:51:28", "command": "CONFIGURE_AG_SETTINGS", "params": {"dipRange": 5.0, "agStartMD": 3824.9999999999995, "logName": "GR", "typelogWellName": "Well2004", "typelogName": "GR", "horizonSmoothness": 3.0, "gridName": "EGFDL1_full", "pseudoLogEndMd": 3624.9999999999995}}
+{"timestamp": 1766933490.2085037, "datetime": "2025-12-28 17:51:30", "command": "START_AG", "params": {}}
+{"timestamp": 1766933703.0076547, "datetime": "2025-12-28 17:55:03", "command": "SELECT_WELL", "params": {"wellUuid": "{392c73d0-690d-453d-8524-1de3bdbdeccf}"}}
+{"timestamp": 1766933706.076669, "datetime": "2025-12-28 17:55:06", "command": "INIT_WELL_SLICER", "params": {"sourceWellUuid": "{392c73d0-690d-453d-8524-1de3bdbdeccf}", "targetWellName": "slicing_well", "cutoffMD": 0, "additionalMD": 90.0}}
+{"timestamp": 1766933709.1218023, "datetime": "2025-12-28 17:55:09", "command": "SELECT_WELL", "params": {"wellUuid": "{e71ccfa5-0530-4496-8198-62c91c955063}"}}
+{"timestamp": 1766933712.1739998, "datetime": "2025-12-28 17:55:12", "command": "COPY_INTERPRETATION", "params": {"sourceInterpretationUuid": "{f0eb08ee-6b63-423d-8b9a-dcb34e6ea6a2}", "targetInterpretationName": "Assisted"}}
+{"timestamp": 1766933716.229354, "datetime": "2025-12-28 17:55:16", "command": "SELECT_INTERPRETATION", "params": {"interpretationUuid": "{10011866-5156-4758-b5b5-9c176773a715}"}}
+{"timestamp": 1766933719.2811368, "datetime": "2025-12-28 17:55:19", "command": "CONFIGURE_AG_SETTINGS", "params": {"dipRange": 5.0, "agStartMD": 4038.4864, "logName": "GR", "typelogWellName": "Well2004", "typelogName": "GR", "horizonSmoothness": 3.0, "gridName": "EGFDL1_full", "pseudoLogEndMd": 3838.4864}}
+{"timestamp": 1766933721.3099804, "datetime": "2025-12-28 17:55:21", "command": "START_AG", "params": {}}
+{"timestamp": 1766933844.1182935, "datetime": "2025-12-28 17:57:24", "command": "SELECT_WELL", "params": {"wellUuid": "{7e76b7e6-14e6-41df-bc31-0b76ab725776}"}}
+{"timestamp": 1766933847.137788, "datetime": "2025-12-28 17:57:27", "command": "INIT_WELL_SLICER", "params": {"sourceWellUuid": "{7e76b7e6-14e6-41df-bc31-0b76ab725776}", "targetWellName": "slicing_well", "cutoffMD": 0, "additionalMD": 90.0}}
+{"timestamp": 1766933850.1684246, "datetime": "2025-12-28 17:57:30", "command": "SELECT_WELL", "params": {"wellUuid": "{0da7b9cf-65cd-4226-bfde-a06c9b858046}"}}
+{"timestamp": 1766933853.2363336, "datetime": "2025-12-28 17:57:33", "command": "COPY_INTERPRETATION", "params": {"sourceInterpretationUuid": "{f7eb67fa-54d3-41b3-9c18-cb27a3730b1d}", "targetInterpretationName": "Assisted"}}
+{"timestamp": 1766933857.290124, "datetime": "2025-12-28 17:57:37", "command": "SELECT_INTERPRETATION", "params": {"interpretationUuid": "{945167b5-06ab-4d24-8ae1-b5de465732a7}"}}
+{"timestamp": 1766933860.3138602, "datetime": "2025-12-28 17:57:40", "command": "CONFIGURE_AG_SETTINGS", "params": {"dipRange": 5.0, "agStartMD": 4060.0, "logName": "GR", "typelogWellName": "Well2004", "typelogName": "GR", "horizonSmoothness": 3.0, "gridName": "EGFDL1_full", "pseudoLogEndMd": 3860.0}}
+{"timestamp": 1766933862.3282244, "datetime": "2025-12-28 17:57:42", "command": "START_AG", "params": {}}
+{"timestamp": 1766933991.031425, "datetime": "2025-12-28 17:59:51", "command": "SELECT_WELL", "params": {"wellUuid": "{03123eca-67c8-48d3-b22b-4c1f098e1cf5}"}}
+{"timestamp": 1766933994.067668, "datetime": "2025-12-28 17:59:54", "command": "INIT_WELL_SLICER", "params": {"sourceWellUuid": "{03123eca-67c8-48d3-b22b-4c1f098e1cf5}", "targetWellName": "slicing_well", "cutoffMD": 0, "additionalMD": 90.0}}
+{"timestamp": 1766933997.0823374, "datetime": "2025-12-28 17:59:57", "command": "SELECT_WELL", "params": {"wellUuid": "{40787747-b46f-4b9c-896f-d65d36877b17}"}}
+{"timestamp": 1766934000.106504, "datetime": "2025-12-28 18:00:00", "command": "COPY_INTERPRETATION", "params": {"sourceInterpretationUuid": "{ce9d6118-0399-4a0f-b7be-65f2c5228368}", "targetInterpretationName": "Assisted"}}
+{"timestamp": 1766934004.1575806, "datetime": "2025-12-28 18:00:04", "command": "SELECT_INTERPRETATION", "params": {"interpretationUuid": "{10a664ef-6223-413a-986c-96d3dd1aaa9e}"}}
+{"timestamp": 1766934007.2342741, "datetime": "2025-12-28 18:00:07", "command": "CONFIGURE_AG_SETTINGS", "params": {"dipRange": 5.0, "agStartMD": 3685.0, "logName": "GR", "typelogWellName": "Well2004", "typelogName": "GR", "horizonSmoothness": 3.0, "gridName": "EGFDL1_full", "pseudoLogEndMd": 3485.0}}
+{"timestamp": 1766934009.2697227, "datetime": "2025-12-28 18:00:09", "command": "START_AG", "params": {}}
+{"timestamp": 1766934124.6431966, "datetime": "2025-12-28 18:02:04", "command": "SELECT_WELL", "params": {"wellUuid": "{86a9e793-263f-4c4e-b0d2-4dee99590bf0}"}}
+{"timestamp": 1766934127.680531, "datetime": "2025-12-28 18:02:07", "command": "INIT_WELL_SLICER", "params": {"sourceWellUuid": "{86a9e793-263f-4c4e-b0d2-4dee99590bf0}", "targetWellName": "slicing_well", "cutoffMD": 0, "additionalMD": 90.0}}
+{"timestamp": 1766934130.7294426, "datetime": "2025-12-28 18:02:10", "command": "SELECT_WELL", "params": {"wellUuid": "{deec357e-8077-4a9f-8def-f229801c9651}"}}
+{"timestamp": 1766934133.75179, "datetime": "2025-12-28 18:02:13", "command": "COPY_INTERPRETATION", "params": {"sourceInterpretationUuid": "{f2f61ddf-e68f-4872-ba26-d7e43f2b5843}", "targetInterpretationName": "Assisted"}}
+{"timestamp": 1766934137.7680013, "datetime": "2025-12-28 18:02:17", "command": "SELECT_INTERPRETATION", "params": {"interpretationUuid": "{eeb2675f-699f-43aa-8b69-b2f6d45d1779}"}}
+{"timestamp": 1766934140.8724594, "datetime": "2025-12-28 18:02:20", "command": "CONFIGURE_AG_SETTINGS", "params": {"dipRange": 5.0, "agStartMD": 3960.0, "logName": "GR", "typelogWellName": "Well2004", "typelogName": "GR", "horizonSmoothness": 3.0, "gridName": "EGFDL1_full", "pseudoLogEndMd": 3760.0}}
+{"timestamp": 1766934142.9567728, "datetime": "2025-12-28 18:02:22", "command": "START_AG", "params": {}}
+{"timestamp": 1766934305.4365268, "datetime": "2025-12-28 18:05:05", "command": "SELECT_WELL", "params": {"wellUuid": "{6a8f4500-2da6-496b-9f57-94863feb8faa}"}}
+{"timestamp": 1766934308.4549932, "datetime": "2025-12-28 18:05:08", "command": "INIT_WELL_SLICER", "params": {"sourceWellUuid": "{6a8f4500-2da6-496b-9f57-94863feb8faa}", "targetWellName": "slicing_well", "cutoffMD": 0, "additionalMD": 90.0}}
+{"timestamp": 1766934311.496752, "datetime": "2025-12-28 18:05:11", "command": "SELECT_WELL", "params": {"wellUuid": "{4603b79b-a778-49ed-bd7f-6fd48293ba51}"}}
+{"timestamp": 1766934314.5734544, "datetime": "2025-12-28 18:05:14", "command": "COPY_INTERPRETATION", "params": {"sourceInterpretationUuid": "{7fe69641-5271-4c5f-a585-a29c4f952c18}", "targetInterpretationName": "Assisted"}}
+{"timestamp": 1766934318.6264358, "datetime": "2025-12-28 18:05:18", "command": "SELECT_INTERPRETATION", "params": {"interpretationUuid": "{f618e77e-94a5-4169-a68f-7d5c8537dea9}"}}
+{"timestamp": 1766934321.6862352, "datetime": "2025-12-28 18:05:21", "command": "CONFIGURE_AG_SETTINGS", "params": {"dipRange": 5.0, "agStartMD": 3855.0, "logName": "GR", "typelogWellName": "Well2004", "typelogName": "GR", "horizonSmoothness": 3.0, "gridName": "EGFDL1_full", "pseudoLogEndMd": 3655.0}}
+{"timestamp": 1766934323.7144046, "datetime": "2025-12-28 18:05:23", "command": "START_AG", "params": {}}
+{"timestamp": 1766934450.3179972, "datetime": "2025-12-28 18:07:30", "command": "SELECT_WELL", "params": {"wellUuid": "{7f3044e7-939b-4e32-b4cf-cf08216c1950}"}}
+{"timestamp": 1766934453.333008, "datetime": "2025-12-28 18:07:33", "command": "INIT_WELL_SLICER", "params": {"sourceWellUuid": "{7f3044e7-939b-4e32-b4cf-cf08216c1950}", "targetWellName": "slicing_well", "cutoffMD": 0, "additionalMD": 90.0}}
+{"timestamp": 1766934456.353988, "datetime": "2025-12-28 18:07:36", "command": "SELECT_WELL", "params": {"wellUuid": "{8d686dd5-84e8-4e56-92b0-5c573a644fc1}"}}
+{"timestamp": 1766934459.3958356, "datetime": "2025-12-28 18:07:39", "command": "COPY_INTERPRETATION", "params": {"sourceInterpretationUuid": "{45a373e3-83b6-4747-a707-362cdfe0a589}", "targetInterpretationName": "Assisted"}}
+{"timestamp": 1766934463.4684231, "datetime": "2025-12-28 18:07:43", "command": "SELECT_INTERPRETATION", "params": {"interpretationUuid": "{5fa71f12-1ef2-43c9-bb2b-c453f295d4b2}"}}
+{"timestamp": 1766934466.51179, "datetime": "2025-12-28 18:07:46", "command": "CONFIGURE_AG_SETTINGS", "params": {"dipRange": 5.0, "agStartMD": 4115.0, "logName": "GR", "typelogWellName": "Well2004", "typelogName": "GR", "horizonSmoothness": 3.0, "gridName": "EGFDL1_full", "pseudoLogEndMd": 3915.0}}
+{"timestamp": 1766934468.588531, "datetime": "2025-12-28 18:07:48", "command": "START_AG", "params": {}}

@@ -268,7 +268,7 @@ class StarSteerSlicerOrchestrator:
             # Write CLOSE_APP command
             command_data = {
                 "command": "CLOSE_APP",
-                "params": {"save_changes": False}
+                "params": {"save_changes": True}
             }
             with open(self.commands_file, 'w', encoding='utf-8') as f:
                 json.dump(command_data, f, indent=2)
@@ -378,7 +378,7 @@ class StarSteerSlicerOrchestrator:
         # Write CLOSE_APP command
         command_data = {
             "command": "CLOSE_APP",
-            "params": {"save_changes": False}
+            "params": {"save_changes": True}
         }
 
         with open(self.commands_file, 'w', encoding='utf-8') as f:
@@ -818,6 +818,7 @@ class StarSteerSlicerOrchestrator:
         TARGET_WELL_NAME = "slicing_well"
         processed_count = 0
         total_wells = len(active_wells)
+        retry_wells = []  # Wells to retry after timeout (max 1 retry)
 
         for well_idx, well_info in enumerate(active_wells, 1):
             source_name = well_info['well_name']
@@ -922,15 +923,39 @@ class StarSteerSlicerOrchestrator:
                     import shutil
                     shutil.copy(typewells_file, save_path)
                     logger.info(f"Saved typewells config to: {save_path}")
-                # Mark as error and continue to next well
-                for well in self.wells_config.get("wells", []):
-                    if well.get("well_name") == source_name:
-                        well["processed"] = True
-                        well["status"] = "error"
-                        well["error"] = str(e)
-                        break
-                self._save_wells_config()
-                continue  # Continue to next well instead of failing
+
+                # Check if timeout - add to retry list (max 1 retry)
+                is_timeout = "timeout" in str(e).lower()
+                is_retry = well_info.get('_is_retry', False)
+
+                if is_timeout and not is_retry:
+                    # First timeout - add to retry list
+                    logger.warning(f"Timeout on {source_name}, will retry after other wells")
+                    retry_well = well_info.copy()
+                    retry_well['_is_retry'] = True
+                    retry_wells.append(retry_well)
+                    # Don't mark as processed - will retry
+                    continue
+                else:
+                    # Non-timeout error or retry exhausted - mark as failed
+                    for well in self.wells_config.get("wells", []):
+                        if well.get("well_name") == source_name:
+                            well["processed"] = True
+                            well["status"] = "error"
+                            well["error"] = str(e)
+                            if is_timeout and is_retry:
+                                logger.error(f"Timeout on {source_name} after retry, marking as failed")
+                            break
+                    self._save_wells_config()
+                    continue  # Continue to next well
+
+        # Process retry wells (timeout wells get one more chance)
+        if retry_wells:
+            logger.info("=" * 70)
+            logger.info(f"RETRY PHASE: {len(retry_wells)} wells to retry after timeout")
+            logger.info("=" * 70)
+            # Recursively process retry wells (they have _is_retry=True so won't retry again)
+            processed_count += self._process_all_wells_init(retry_wells)
 
         return processed_count
 
@@ -1903,7 +1928,12 @@ class StarSteerSlicerOrchestrator:
             logger.info("SAVE_NG_INTERPRETATION disabled - skipping")
             return
 
-        ng_interp_name = os.getenv('NG_INTERPRETATION_NAME', 'AI_Interpretation')
+        ng_interp_base = os.getenv('NG_INTERPRETATION_NAME', 'AI_Interpretation')
+        # Add params suffix for visual analysis (e.g. _p2.0_m0.001_a2.0)
+        pearson_p = os.getenv('PYTHON_PEARSON_POWER', '2.0')
+        mse_p = os.getenv('PYTHON_MSE_POWER', '0.001')
+        angle_p = os.getenv('PYTHON_ANGLE_SUM_POWER', '2.0')
+        ng_interp_name = f"{ng_interp_base}_p{pearson_p}_m{mse_p}_a{angle_p}"
         logger.info("=" * 70)
         logger.info(f"SAVING {ng_interp_name} TO SOURCE WELL: {source_name}")
         logger.info("=" * 70)

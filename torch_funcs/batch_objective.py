@@ -61,11 +61,13 @@ def batch_objective_function_torch(
     # Calculate angles for all batches: (batch, K)
     angles = calc_segment_angles_torch(segments_batch)
 
-    # Angle penalty: (batch,)
+    # Exponential penalty for angle violations: 1M * 100^max_excess
     angle_excess = torch.abs(angles) - angle_range
-    angle_penalty = torch.sum(
-        torch.where(angle_excess > 0, 1000 * angle_excess ** 2, torch.zeros_like(angle_excess)),
-        dim=1
+    max_excess = torch.clamp(torch.max(angle_excess, dim=1).values, min=0.0)  # (batch,)
+    angle_violation_penalty = torch.where(
+        max_excess > 0,
+        1_000_000.0 * torch.pow(torch.tensor(100.0, device=device, dtype=dtype), max_excess),
+        torch.zeros_like(max_excess)
     )
 
     # Angle sum penalty: (batch,)
@@ -150,14 +152,17 @@ def batch_objective_function_torch(
     # Combine metrics
     pearson_component = 1 - pearson
 
-    # Calculate full metric
+    # Calculate full metric (angle_sum_penalty remains as soft constraint)
     metric_values = (
         (pearson_component ** pearson_power) *
         (mse ** mse_power) *
         (1.0 / intersections_component)
-    ) * (1 + angle_penalty + angle_sum_penalty)
+    ) * (1 + angle_sum_penalty)
 
-    # Apply success mask - failed evaluations get inf
+    # Apply angle violation penalty (exponential)
+    metric_values = metric_values * (1 + angle_violation_penalty)
+
+    # Apply success mask - only projection failure causes inf
     metrics = torch.where(success_mask, metric_values, metrics)
 
     return metrics
@@ -197,10 +202,12 @@ def compute_detailed_metrics_torch(
     angles = calc_segment_angles_torch(segments_batch)
     angles_deg = angles[0].cpu().numpy()  # First (only) batch item
 
-    # Angle penalty
+    # Hard constraint check (for logging)
     angle_excess = torch.abs(angles) - angle_range
+    angle_violation = torch.any(angle_excess > 0, dim=1)
+    # For logging purposes, compute penalty value
     angle_penalty = torch.sum(
-        torch.where(angle_excess > 0, 1000 * angle_excess ** 2, torch.zeros_like(angle_excess)),
+        torch.where(angle_excess > 0, angle_excess ** 2, torch.zeros_like(angle_excess)),
         dim=1
     )
 
@@ -237,12 +244,18 @@ def compute_detailed_metrics_torch(
     mse = mse_batch_torch(value_batch, synt_curve_batch)
     pearson = pearson_batch_torch(value_batch, synt_curve_batch)
 
-    # Compute objective
+    # Clamp pearson to min_pearson_value (passed via angle_range parameter position)
+    # Note: compute_detailed doesn't have min_pearson_value param, so we use 0.3 as default
+    # TODO: Add min_pearson_value to function signature
+    pearson = torch.clamp(pearson, min=0.3)
+
+    # Compute objective (angle violation -> inf)
     pearson_component = 1 - pearson
-    objective = (
+    base_objective = (
         (pearson_component ** pearson_power) *
         (mse ** mse_power)
-    ) * (1 + angle_penalty + angle_sum_penalty)
+    ) * (1 + angle_sum_penalty)
+    objective = torch.where(angle_violation, torch.tensor(float('inf'), device=device, dtype=dtype), base_objective)
 
     return {
         'objective': objective[0].item(),

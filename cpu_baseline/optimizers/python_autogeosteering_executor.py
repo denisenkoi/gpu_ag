@@ -66,6 +66,7 @@ class PythonAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         # Additional optimization parameters
         self.pearson_power = float(os.getenv('PYTHON_PEARSON_POWER', '2.0'))
         self.mse_power = float(os.getenv('PYTHON_MSE_POWER', '0.001'))
+        self.angle_sum_power = float(os.getenv('PYTHON_ANGLE_SUM_POWER', '2.0'))
         self.num_intervals_self_correlation = int(os.getenv('PYTHON_NUM_INTERVALS_SC', '20'))
         self.sc_power = float(os.getenv('PYTHON_SC_POWER', '1.15'))
         self.min_pearson_value = float(os.getenv('PYTHON_MIN_PEARSON_VALUE', '-1.0'))
@@ -367,7 +368,7 @@ class PythonAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
             self_corr_start_idx=self.start_idx,
             segments=segments_to_optimize,
             angle_range=self.angle_range,
-            angle_sum_power=2.0,
+            angle_sum_power=self.angle_sum_power,
             segm_counts_reg=[2, 4, 6, 10],
             num_iterations=self.num_iterations,
             pearson_power=self.pearson_power,
@@ -475,7 +476,7 @@ class PythonAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
             self_corr_start_idx=lookback_idx,
             segments=segments_to_optimize,
             angle_range=self.angle_range,
-            angle_sum_power=2.0,
+            angle_sum_power=self.angle_sum_power,
             segm_counts_reg=[2, 4, 6, 10],
             num_iterations=self.num_iterations,
             pearson_power=self.pearson_power,

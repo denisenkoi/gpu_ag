@@ -309,6 +309,37 @@ class InterpretationQualityAnalyzer:
         # Calculate metrics
         return self._calculate_metrics(comparison_points, well_name, current_md)
 
+    def _normalize_segments(self, segments: List[Dict], last_md: float) -> List[Dict]:
+        """Normalize segments to ensure all have proper endMd."""
+        if not segments:
+            return []
+
+        normalized = []
+        for i, seg in enumerate(segments):
+            norm_seg = seg.copy()
+
+            start_md = seg.get('startMd')
+            if start_md is None:
+                continue
+
+            end_md = seg.get('endMd')
+            if end_md is None:
+                if i + 1 < len(segments):
+                    next_seg = segments[i + 1]
+                    end_md = next_seg.get('startMd')
+                else:
+                    end_md = last_md
+            norm_seg['endMd'] = end_md
+
+            if 'startShift' not in norm_seg:
+                norm_seg['startShift'] = seg.get('shift', 0)
+            if 'endShift' not in norm_seg:
+                norm_seg['endShift'] = seg.get('shift', 0)
+
+            normalized.append(norm_seg)
+
+        return normalized
+
     def _prepare_comparison_points(self,
                                    reference_segments: List[Dict[str, float]],
                                    computed_segments: List[Dict[str, float]],
@@ -316,13 +347,17 @@ class InterpretationQualityAnalyzer:
                                    end_md: float) -> List[Tuple[float, float, float]]:
         """Подготавливает точки для сравнения с шагом 1 метр"""
 
+        # Normalize segments to ensure proper endMd
+        ref_normalized = self._normalize_segments(reference_segments, end_md)
+        comp_normalized = self._normalize_segments(computed_segments, end_md)
+
         comparison_points = []
 
         # Generate points every 1 meter in the quality range
         current_md = start_md
         while current_md <= end_md:
-            reference_shift = self._interpolate_shift(reference_segments, current_md)
-            computed_shift = self._interpolate_shift(computed_segments, current_md)
+            reference_shift = self._interpolate_shift(ref_normalized, current_md)
+            computed_shift = self._interpolate_shift(comp_normalized, current_md)
 
             # Add point only if both values are available
             if reference_shift is not None and computed_shift is not None:
@@ -342,12 +377,15 @@ class InterpretationQualityAnalyzer:
         for i, segment in enumerate(segments):
             start_md = segment['startMd']
 
-            # Determine segment end
-            if i + 1 < len(segments):
-                end_md = segments[i + 1]['startMd']
-            else:
-                # Last segment - use large value
-                end_md = start_md + 10000.0
+            # Determine segment end - use endMd from segment, fallback to next segment's startMd
+            end_md = segment.get('endMd')
+            if end_md is None:
+                if i + 1 < len(segments):
+                    end_md = segments[i + 1]['startMd']
+                else:
+                    # Last segment without endMd - this should not happen after normalization
+                    raise ValueError(f"Last segment at startMd={start_md} has no endMd. "
+                                   f"Segments must be normalized before interpolation.")
 
             if start_md <= md < end_md:
                 # Linear interpolation between startShift and endShift

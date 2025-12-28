@@ -42,7 +42,9 @@ from torch_funcs.batch_objective import TorchObjectiveWrapper
 
 # EvoTorch
 from evotorch import Problem
-from evotorch.algorithms import SNES, CMAES
+from evotorch.algorithms import SNES, CMAES, XNES, GeneticAlgorithm
+from evotorch.operators import OnePointCrossOver, TwoPointCrossOver, SimulatedBinaryCrossOver, GaussianMutation
+import pyswarms as ps
 from scipy.optimize import differential_evolution
 from gr_utils import apply_gr_smoothing
 
@@ -250,7 +252,24 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         self.angle_grid_step = float(os.getenv('GPU_ANGLE_GRID_STEP', '1.0'))  # Angle grid step for center generation (degrees)
         self.cmaes_mode = os.getenv('GPU_CMAES_MODE', 'multi').lower()  # 'single' or 'multi'
         self.single_popsize = int(os.getenv('GPU_SINGLE_POPSIZE', '500'))  # popsize for single mode
-        self.montecarlo_samples = int(os.getenv('GPU_MONTECARLO_SAMPLES', '100000'))  # samples for Monte Carlo
+        self.montecarlo_samples = int(os.getenv('GPU_MONTECARLO_SAMPLES', '100000'))  # samples per iteration
+        self.montecarlo_iterations = int(os.getenv('GPU_MONTECARLO_ITERATIONS', '1'))  # number of iterations
+        self.center_lr = float(os.getenv('GPU_CENTER_LR', '0.5'))  # center learning rate for SNES/XNES
+        self.stdev_lr = float(os.getenv('GPU_STDEV_LR', '0.1'))  # stdev learning rate for SNES/XNES
+
+        # GA parameters
+        self.ga_popsize = int(os.getenv('GPU_GA_POPSIZE', '100'))
+        self.ga_mutation_std = float(os.getenv('GPU_GA_MUTATION_STD', '0.1'))
+        self.ga_crossover = os.getenv('GPU_GA_CROSSOVER', 'OnePoint')  # OnePoint, TwoPoint, SBX
+        self.ga_tournament_size = int(os.getenv('GPU_GA_TOURNAMENT_SIZE', '4'))
+        self.ga_elitist = os.getenv('GPU_GA_ELITIST', 'true').lower() == 'true'
+
+        # PSO parameters (pyswarms - CPU)
+        self.pso_particles = int(os.getenv('GPU_PSO_PARTICLES', '50'))
+        self.pso_iterations = int(os.getenv('GPU_PSO_ITERATIONS', '200'))
+        self.pso_c1 = float(os.getenv('GPU_PSO_C1', '2.0'))  # cognitive parameter
+        self.pso_c2 = float(os.getenv('GPU_PSO_C2', '2.0'))  # social parameter
+        self.pso_w = float(os.getenv('GPU_PSO_W', '0.7'))    # inertia weight
 
         # PseudoTypeLog support
         self.use_pseudo_typelog = os.getenv('USE_PSEUDOTYPELOG', 'false').lower() == 'true'
@@ -481,6 +500,10 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         K = len(segments)
         lb = bounds[:, 0].cpu().numpy()
         ub = bounds[:, 1].cpu().numpy()
+        # DEBUG: Log bounds
+        lb_m = lb * self.fixed_md_range
+        ub_m = ub * self.fixed_md_range
+        logger.info(f"  DEBUG bounds (meters): lb={[f'{x:.2f}' for x in lb_m]}, ub={[f'{x:.2f}' for x in ub_m]}")
         stdev_init = (ub - lb).mean() / 2.0  # was /4.0 - wider initial distribution
 
         # Define EvoTorch Problem
@@ -611,25 +634,137 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                     best_overall_fun = wrapper(best_overall_x.unsqueeze(0)).item()
 
         elif self.algorithm == 'MONTECARLO':
-            # Pure random search on GPU - uniform sampling
+            # Pure random search on GPU - multi-iteration uniform sampling
             samples = self.montecarlo_samples
-            logger.info(f"MONTECARLO: {samples} random samples, bounds={K}D")
+            iterations = self.montecarlo_iterations
+            total_samples = samples * iterations
+            logger.info(f"MONTECARLO: {samples} samples x {iterations} iterations = {total_samples} total, bounds={K}D")
 
-            # Generate uniform random samples within bounds
             lb_tensor = torch.tensor(lb, dtype=torch.float64, device=self.device)
             ub_tensor = torch.tensor(ub, dtype=torch.float64, device=self.device)
-            random_samples = torch.rand(samples, K, dtype=torch.float64, device=self.device)
-            random_samples = random_samples * (ub_tensor - lb_tensor) + lb_tensor
 
-            # Evaluate all samples at once (GPU batch)
-            fitness = wrapper(random_samples)
+            best_overall_fun = float('inf')
+            best_overall_x = None
 
-            # Find best
-            best_idx = fitness.argmin()
-            best_overall_fun = fitness[best_idx].item()
-            best_overall_x = random_samples[best_idx].clone()
+            for it in range(iterations):
+                # Generate uniform random samples within bounds
+                random_samples = torch.rand(samples, K, dtype=torch.float64, device=self.device)
+                random_samples = random_samples * (ub_tensor - lb_tensor) + lb_tensor
 
-            self.last_num_populations = 1
+                # Evaluate all samples at once (GPU batch)
+                fitness = wrapper(random_samples)
+
+                # Find best in this iteration
+                best_idx = fitness.argmin()
+                iter_best_fun = fitness[best_idx].item()
+
+                if iter_best_fun < best_overall_fun:
+                    best_overall_fun = iter_best_fun
+                    best_overall_x = random_samples[best_idx].clone()
+
+                # Cleanup GPU memory after each iteration
+                del random_samples, fitness
+                torch.cuda.empty_cache()
+
+            del lb_tensor, ub_tensor
+            self.last_num_populations = iterations
+
+        elif self.algorithm == 'XNES':
+            for restart in range(self.n_restarts):
+                problem = AGProblem()
+                searcher = XNES(
+                    problem,
+                    popsize=self.popsize,
+                    stdev_init=stdev_init,
+                    center_learning_rate=self.center_lr,
+                    stdev_learning_rate=self.stdev_lr
+                )
+
+                for _ in range(self.maxiter):
+                    searcher.step()
+
+                pop = searcher.population
+                if pop is not None and hasattr(pop, 'evals') and pop.evals is not None:
+                    valid_mask = ~torch.isinf(pop.evals)
+                    if valid_mask.any():
+                        best_idx = pop.evals.argmin()
+                        best_fun = pop.evals[best_idx].item()
+                        best_x = pop.values[best_idx]
+                        if best_fun < best_overall_fun:
+                            best_overall_fun = best_fun
+                            best_overall_x = best_x.clone()
+
+        elif self.algorithm == 'GA':
+            for restart in range(self.n_restarts):
+                problem = AGProblem()
+
+                # Create operators for problem
+                if self.ga_crossover == 'TwoPoint':
+                    crossover_op = TwoPointCrossOver(problem, tournament_size=self.ga_tournament_size)
+                elif self.ga_crossover == 'SBX':
+                    crossover_op = SimulatedBinaryCrossOver(problem, tournament_size=self.ga_tournament_size, eta=20)
+                else:
+                    crossover_op = OnePointCrossOver(problem, tournament_size=self.ga_tournament_size)
+                mutation_op = GaussianMutation(problem, stdev=self.ga_mutation_std)
+
+                searcher = GeneticAlgorithm(
+                    problem,
+                    popsize=self.ga_popsize,
+                    operators=[crossover_op, mutation_op],
+                    elitist=self.ga_elitist
+                )
+
+                for _ in range(self.maxiter):
+                    searcher.step()
+
+                pop = searcher.population
+                if pop is not None and hasattr(pop, 'evals') and pop.evals is not None:
+                    valid_mask = ~torch.isinf(pop.evals)
+                    if valid_mask.any():
+                        best_idx = pop.evals.argmin()
+                        best_fun = pop.evals[best_idx].item()
+                        best_x = pop.values[best_idx]
+                        if best_fun < best_overall_fun:
+                            best_overall_fun = best_fun
+                            best_overall_x = best_x.clone()
+
+        elif self.algorithm == 'PSO':
+            # PSO using pyswarms (CPU-based)
+            # Convert bounds to numpy
+            lb_np = lb.cpu().numpy() if isinstance(lb, torch.Tensor) else lb
+            ub_np = ub.cpu().numpy() if isinstance(ub, torch.Tensor) else ub
+            bounds = (lb_np, ub_np)
+
+            # Objective function for pyswarms (expects shape [n_particles, n_dims])
+            def pso_objective(x):
+                # x shape: [n_particles, n_dims]
+                x_tensor = torch.tensor(x, dtype=torch.float64, device=self.device)
+                costs = wrapper(x_tensor)
+                return costs.cpu().numpy()
+
+            # PSO options
+            options = {
+                'c1': self.pso_c1,  # cognitive parameter
+                'c2': self.pso_c2,  # social parameter
+                'w': self.pso_w     # inertia weight
+            }
+
+            n_dims = len(lb_np)
+            optimizer = ps.single.GlobalBestPSO(
+                n_particles=self.pso_particles,
+                dimensions=n_dims,
+                options=options,
+                bounds=bounds
+            )
+
+            best_cost, best_pos = optimizer.optimize(
+                pso_objective,
+                iters=self.pso_iterations,
+                verbose=False
+            )
+
+            best_overall_fun = best_cost
+            best_overall_x = torch.tensor(best_pos, dtype=torch.float64, device=self.device)
 
         else:  # SNES (default)
             for restart in range(self.n_restarts):
@@ -638,8 +773,8 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                     problem,
                     popsize=self.popsize,
                     stdev_init=stdev_init,
-                    center_learning_rate=0.5,
-                    stdev_learning_rate=0.1
+                    center_learning_rate=self.center_lr,
+                    stdev_learning_rate=self.stdev_lr
                 )
 
                 for _ in range(self.maxiter):
@@ -800,6 +935,12 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
             segments_to_optimize, self.start_idx, prev_segment_angle
         )
 
+        # DEBUG: Log raw shifts from optimizer
+        logger.info(f"  RAW optimal_shifts (normalized): {[f'{s:.6f}' for s in optimal_shifts]}")
+        # Denormalize to meters for human readability
+        raw_shifts_m = [s * self.fixed_md_range for s in optimal_shifts]
+        logger.info(f"  RAW optimal_shifts (meters): {[f'{s:.2f}' for s in raw_shifts_m]}")
+
         # Compute detailed metrics comparison
         self._log_metrics_comparison(
             wrapper, optimal_shifts, segments_to_optimize, 'init'
@@ -883,6 +1024,12 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         best_fun, optimal_shifts, elapsed, wrapper = self._optimize_with_snes(
             segments_to_optimize, lookback_idx, prev_segment_angle
         )
+
+        # DEBUG: Log raw shifts from optimizer
+        logger.info(f"  RAW optimal_shifts (normalized): {[f'{s:.6f}' for s in optimal_shifts]}")
+        # Denormalize to meters for human readability
+        raw_shifts_m = [s * self.fixed_md_range for s in optimal_shifts]
+        logger.info(f"  RAW optimal_shifts (meters): {[f'{s:.2f}' for s in raw_shifts_m]}")
 
         # Compute detailed metrics comparison
         self._log_metrics_comparison(
@@ -1002,6 +1149,18 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         ref_shifts_m, ref_shifts_norm, first_start_shift_norm = get_reference_shifts_for_segments(
             self.reference_segments, segment_end_mds_m, self.fixed_md_range, first_start_md_m
         )
+
+        # DEBUG: Log segments TVD info for angle calculation
+        seg_torch = wrapper.segments_torch
+        logger.info(f"  DEBUG segments_torch shape: {seg_torch.shape}")
+        for i in range(min(4, seg_torch.shape[0])):
+            start_tvd = seg_torch[i, 2].item() * self.fixed_md_range
+            end_tvd = seg_torch[i, 3].item() * self.fixed_md_range
+            start_shift = seg_torch[i, 4].item() * self.fixed_md_range
+            end_shift = seg_torch[i, 5].item() * self.fixed_md_range
+            delta_tvd = end_tvd - start_tvd
+            delta_shift = end_shift - start_shift
+            logger.info(f"  Seg[{i}]: TVD={start_tvd:.2f}-{end_tvd:.2f}m (Δ={delta_tvd:.2f}m), Shift={start_shift:.2f}-{end_shift:.2f}m (Δ={delta_shift:.2f}m)")
 
         # Compute detailed metrics for optimized
         opt_metrics = wrapper.compute_detailed(optimal_shifts)

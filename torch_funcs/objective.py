@@ -53,9 +53,13 @@ def objective_function_torch(
     # Calculate segment angles
     angles = calc_segment_angles_torch(new_segments)
 
-    # Angle penalty
+    # Exponential penalty for angle violations: 1M * 100^max_excess
     angle_excess = torch.abs(angles) - angle_range
-    angle_penalty = torch.sum(torch.where(angle_excess > 0, 1000 * angle_excess ** 2, torch.zeros_like(angle_excess)))
+    max_excess = torch.clamp(torch.max(angle_excess), min=0.0)
+    if max_excess > 0:
+        angle_violation_penalty = 1_000_000.0 * torch.pow(torch.tensor(100.0, device=device, dtype=dtype), max_excess)
+    else:
+        angle_violation_penalty = torch.tensor(0.0, device=device, dtype=dtype)
 
     # Angle sum penalty
     if len(angles) > 1:
@@ -138,6 +142,6 @@ def objective_function_torch(
         (pearson_component ** pearson_power) *
         (mse ** mse_power) *
         (1.0 / intersections_component)
-    ) * (1 + angle_penalty + angle_sum_penalty)
+    ) * (1 + angle_sum_penalty) * (1 + angle_violation_penalty)
 
     return metric

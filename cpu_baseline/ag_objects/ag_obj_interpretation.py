@@ -97,18 +97,22 @@ class Segment:
         }
 
 
-def create_segments_from_json(json_segments, well:Well, current_end_md=None):
+def create_segments_from_json(json_segments, well:Well, current_end_md=None, last_md=None):
     """
     Создание списка сегментов из JSON массива
 
     Args:
         json_segments: массив JSON сегментов
         well: Well object
-        current_end_md: текущая MD для обрезки из эмулятора
+        current_end_md: текущая MD для обрезки из эмулятора (deprecated, use last_md)
+        last_md: MD для endMd последнего сегмента (обычно lateralWellLastMD)
 
     Returns:
         List[Segment]: список созданных сегментов
     """
+    # Use last_md if provided, otherwise fall back to current_end_md for backwards compatibility
+    end_md_for_last = last_md if last_md is not None else current_end_md
+
     segments = []
     for i, json_segment in enumerate(json_segments):
         # Определяем следующий сегмент для расчета endMd
@@ -119,21 +123,38 @@ def create_segments_from_json(json_segments, well:Well, current_end_md=None):
         # Вычисляем endMd
         if next_segment and 'startMd' in next_segment:
             extended_json_segment['endMd'] = next_segment['startMd']
+        elif end_md_for_last is not None:
+            # Последний сегмент - используем переданную last_md
+            extended_json_segment['endMd'] = end_md_for_last
+        else:
+            # Нет last_md - используем конец траектории скважины
+            extended_json_segment['endMd'] = well.measured_depth[-1]
 
-            # Создаем сегмент - если он за пределами well, упадет с assertion
-            segment = Segment(extended_json_segment, well=well)
+        start_md = extended_json_segment.get('startMd')
+        end_md = extended_json_segment.get('endMd')
 
-            if segment.start_idx >= segment.end_idx:
-                print(f"ERROR in MD: {well.measured_depth[segment.start_idx]}")
-                print(f"error in {i} SEGMENT.  segment.start_idx({segment.start_idx}) MUST be < then segment.end_idx({segment.end_idx})")
-                raise ValueError('segment.start_idx == segment.end_idx!!!!!!!!!!!!!!')
-            segments.append(segment)
-        # elif current_end_md is not None:
-        #     extended_json_segment['endMd'] = current_end_md
-        # else:
-        #     extended_json_segment['endMd'] = well.measured_depth[-1]
+        # Skip segments completely outside well bounds
+        if start_md is not None and start_md > well.max_md:
+            logger.debug(f"Skipping segment {i}: startMd={start_md:.2f}m > well.max_md={well.max_md:.2f}m")
+            continue
+        if end_md is not None and end_md < well.min_md:
+            logger.debug(f"Skipping segment {i}: endMd={end_md:.2f}m < well.min_md={well.min_md:.2f}m")
+            continue
 
-        # Создаем сегмент с расширенным JSON
+        # Clamp segment to well bounds
+        if start_md is not None and start_md < well.min_md:
+            extended_json_segment['startMd'] = well.min_md
+        if end_md is not None and end_md > well.max_md:
+            extended_json_segment['endMd'] = well.max_md
+
+        # Создаем сегмент
+        segment = Segment(extended_json_segment, well=well)
+
+        if segment.start_idx >= segment.end_idx:
+            print(f"ERROR in MD: {well.measured_depth[segment.start_idx]}")
+            print(f"error in {i} SEGMENT.  segment.start_idx({segment.start_idx}) MUST be < then segment.end_idx({segment.end_idx})")
+            raise ValueError('segment.start_idx == segment.end_idx!!!!!!!!!!!!!!')
+        segments.append(segment)
 
     return segments
 

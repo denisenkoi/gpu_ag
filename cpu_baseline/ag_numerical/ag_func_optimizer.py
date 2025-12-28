@@ -2,7 +2,10 @@ import numpy as np
 from scipy.optimize import minimize, differential_evolution
 from copy import deepcopy
 import random
-from ag_rewards.ag_func_correlations import calculate_correlation, objective_function_optimizer
+from ag_rewards.ag_func_correlations import objective_function_optimizer
+import sys
+sys.path.insert(0, '/mnt/e/Projects/Rogii/gpu_ag')
+from numpy_funcs import compute_detailed_metrics_numpy
 from ag_objects.ag_obj_interpretation import create_segments, get_shift_by_idx, trim_segments_to_range
 
 
@@ -145,21 +148,25 @@ def optimizer_fit(well,
 
     # Рассчитываем итоговую корреляцию для оптимальных сегментов
     well_copy = deepcopy(well)
-    well_copy.calc_horizontal_projection(typewell, optimal_segments, tvd_to_typewell_shift)
-    corr, _, self_correlation, _, _, pearson, num_points, mse, _, _ = calculate_correlation(
+    metrics = compute_detailed_metrics_numpy(
         well_copy,
+        typewell,
+        optimal_segments,
         self_corr_start_idx,
-        optimal_segments[0].start_idx,
-        optimal_segments[-1].end_idx,
-        float('inf'),
-        0,
-        0,
         pearson_power,
         mse_power,
         num_intervals_self_correlation,
         sc_power,
-        min_pearson_value
+        angle_range,
+        angle_sum_power,
+        min_pearson_value,
+        tvd_to_typewell_shift
     )
+    corr = metrics['metric']
+    self_correlation = metrics['self_correlation']
+    pearson = metrics['pearson']
+    mse = metrics['mse']
+    num_points = metrics['num_points']
 
     # Генерируем результаты с основным оптимальным решением
     results = [(corr, self_correlation, pearson, mse, num_points, optimal_segments, well_copy)]
@@ -184,28 +191,33 @@ def optimizer_fit(well,
 
         # Рассчитываем корреляцию для возмущенных сегментов
         noisy_well = deepcopy(well)
-        success = noisy_well.calc_horizontal_projection(typewell, noisy_segments, tvd_to_typewell_shift)
-        if success:
-            perturbed_corr, _, perturbed_self_correlation, _, _, perturbed_pearson, perturbed_num_points, perturbed_mse, _, _ = calculate_correlation(
-                noisy_well,
-                self_corr_start_idx,
-                noisy_segments[0].start_idx,
-                noisy_segments[-1].end_idx,
-                float('inf'),
-                0,
-                0,
-                pearson_power,
-                mse_power,
-                num_intervals_self_correlation,
-                sc_power,
-                min_pearson_value
-            )
+        perturbed_metrics = compute_detailed_metrics_numpy(
+            noisy_well,
+            typewell,
+            noisy_segments,
+            self_corr_start_idx,
+            pearson_power,
+            mse_power,
+            num_intervals_self_correlation,
+            sc_power,
+            angle_range,
+            angle_sum_power,
+            min_pearson_value,
+            tvd_to_typewell_shift
+        )
+        if perturbed_metrics['success']:
+            results.append((
+                perturbed_metrics['metric'],
+                perturbed_metrics['self_correlation'],
+                perturbed_metrics['pearson'],
+                perturbed_metrics['mse'],
+                perturbed_metrics['num_points'],
+                noisy_segments,
+                noisy_well
+            ))
 
-            results.append((perturbed_corr, perturbed_self_correlation, perturbed_pearson, perturbed_mse,
-                            perturbed_num_points, noisy_segments, noisy_well))
-
-    # Сортируем результаты по корреляции (по убыванию)
-    results.sort(key=lambda x: x[0], reverse=True)
+    # Сортируем результаты по метрике (по возрастанию - меньше = лучше)
+    results.sort(key=lambda x: x[0], reverse=False)
 
     return results
 
