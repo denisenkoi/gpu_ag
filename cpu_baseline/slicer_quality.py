@@ -24,7 +24,7 @@ class SlicerQualityAnalyzer:
     Uses composition to reuse InterpretationQualityAnalyzer methods.
     """
 
-    def __init__(self, config: Dict[str, Any], dip_range: float = None, lookback: float = None, smoothness: float = None):
+    def __init__(self, config: Dict[str, Any], dip_range: float = None, lookback: float = None, smoothness: float = None, instance_suffix: str = None):
         """
         Initialize real-time quality analyzer.
 
@@ -37,6 +37,7 @@ class SlicerQualityAnalyzer:
             dip_range: Dip range parameter (for filename)
             lookback: Lookback distance parameter (for filename)
             smoothness: Smoothness parameter (for filename)
+            instance_suffix: Instance identifier for parallel runs (e.g., "de", "de_2")
         """
         # Create batch analyzer instance to reuse its methods
         self._batch_analyzer = InterpretationQualityAnalyzer()
@@ -51,6 +52,8 @@ class SlicerQualityAnalyzer:
             filename_parts.append(f"lookback{lookback:.1f}")
         if smoothness is not None:
             filename_parts.append(f"smooth{smoothness:.1f}")
+        if instance_suffix:
+            filename_parts.append(instance_suffix)
 
         filename = "_".join(filename_parts) + ".csv"
         self.csv_path = results_dir / filename

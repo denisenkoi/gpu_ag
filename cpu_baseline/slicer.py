@@ -100,11 +100,18 @@ class StarSteerSlicerOrchestrator:
         lookback = float(os.getenv('LOOKBACK_DISTANCE', 0))
         smoothness = float(os.getenv('SMOOTHNESS', 0))
 
+        # Extract instance suffix from starsteer_dir for parallel runs (e.g., "de", "de_2")
+        instance_suffix = None
+        starsteer_dir_name = self.starsteer_dir.name
+        if starsteer_dir_name.startswith("slicer_"):
+            instance_suffix = starsteer_dir_name.replace("slicer_", "")
+
         self.quality_analyzer = SlicerQualityAnalyzer(
             self.config,
             dip_range=dip_range if dip_range > 0 else None,
             lookback=lookback if lookback > 0 else None,
-            smoothness=smoothness if smoothness > 0 else None
+            smoothness=smoothness if smoothness > 0 else None,
+            instance_suffix=instance_suffix
         )
 
         # Slice ID counter for duplicate detection (STARSTEER slice_id)
@@ -471,10 +478,18 @@ class StarSteerSlicerOrchestrator:
         task_id = f"task_{timestamp}_starsteer"
         trigger_file = trigger_dir / f"{task_id}.json"
 
+        # Select BAT file based on starsteer_dir
+        starsteer_dir_str = str(self.starsteer_dir)
+        if "slicer_de_2" in starsteer_dir_str:
+            bat_file = "runss_slicer_de_2.bat"
+        else:
+            bat_file = "runss_slicer_de.bat"
+        logger.info(f"Using BAT file: {bat_file}")
+
         trigger_data = {
             "task_id": task_id,
             "type": "run_bat",
-            "script_path": "runss_slicer_de.bat",
+            "script_path": bat_file,
             "bot_id": "SSAndAG",
             "created_at": timestamp
         }
@@ -652,6 +667,100 @@ class StarSteerSlicerOrchestrator:
                 return
 
             time.sleep(1)
+
+    def _wait_for_interpretation_in_list(self, name: str, poll_interval: float = 0.3, max_retries: int = 20) -> str:
+        """
+        Wait until interpretation with given name appears in interpretations_list.json.
+
+        Args:
+            name: Interpretation name to find
+            poll_interval: Seconds between polls (default 0.3)
+            max_retries: Maximum poll attempts (default 20 = 6 sec max)
+
+        Returns:
+            UUID of found interpretation
+
+        Raises:
+            TimeoutError: If interpretation not found within retries
+        """
+        interp_list_file = self.starsteer_dir / "interpretations_list.json"
+
+        for attempt in range(max_retries):
+            if interp_list_file.exists():
+                with open(interp_list_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+
+                for interp in data.get("interpretations", []):
+                    if interp.get("name") == name:
+                        uuid = interp.get("uuid")
+                        logger.info(f"✓ Found interpretation '{name}': {uuid} (attempt {attempt + 1})")
+                        return uuid
+
+            if attempt < max_retries - 1:
+                time.sleep(poll_interval)
+
+        raise TimeoutError(f"Interpretation '{name}' not found after {max_retries} attempts ({max_retries * poll_interval:.1f}s)")
+
+    def _wait_for_interpretation_active(self, uuid: str, poll_interval: float = 0.3, max_retries: int = 20) -> bool:
+        """
+        Wait until interpretation becomes active (is_active=true in interpretations_list.json).
+
+        Args:
+            uuid: Interpretation UUID to check
+            poll_interval: Seconds between polls (default 0.3)
+            max_retries: Maximum poll attempts (default 20 = 6 sec max)
+
+        Returns:
+            True if interpretation is active
+
+        Raises:
+            TimeoutError: If interpretation not active within retries
+        """
+        interp_list_file = self.starsteer_dir / "interpretations_list.json"
+
+        for attempt in range(max_retries):
+            if interp_list_file.exists():
+                with open(interp_list_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+
+                for interp in data.get("interpretations", []):
+                    if interp.get("uuid") == uuid and interp.get("is_active"):
+                        logger.info(f"✓ Interpretation {uuid} is active (attempt {attempt + 1})")
+                        return True
+
+            if attempt < max_retries - 1:
+                time.sleep(poll_interval)
+
+        raise TimeoutError(f"Interpretation {uuid} not active after {max_retries} attempts ({max_retries * poll_interval:.1f}s)")
+
+    def _wait_for_ag_running(self, poll_interval: float = 0.3, max_retries: int = 20) -> bool:
+        """
+        Wait until autogeosteering.running=true in status.json.
+
+        Args:
+            poll_interval: Seconds between polls (default 0.3)
+            max_retries: Maximum poll attempts (default 20 = 6 sec max)
+
+        Returns:
+            True if AG is running
+
+        Raises:
+            TimeoutError: If AG not running within retries
+        """
+        for attempt in range(max_retries):
+            if self.status_file.exists():
+                with open(self.status_file, 'r', encoding='utf-8') as f:
+                    status = json.load(f)
+
+                ag_state = status.get("application_state", {}).get("autogeosteering", {})
+                if ag_state.get("running"):
+                    logger.info(f"✓ AG is running (attempt {attempt + 1})")
+                    return True
+
+            if attempt < max_retries - 1:
+                time.sleep(poll_interval)
+
+        raise TimeoutError(f"AG not running after {max_retries} attempts ({max_retries * poll_interval:.1f}s)")
 
     def _load_wells_config(self) -> List[Dict]:
         """Load wells from wells_config.json in instance directory.
@@ -1076,24 +1185,8 @@ class StarSteerSlicerOrchestrator:
                 "targetInterpretationName": "Assisted"
             })
 
-            # Wait for copy to complete
-            time.sleep(2)
-
-            # Re-read interpretations_list.json to find Assisted
-            with open(interp_list_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
-            interpretations = data.get("interpretations", [])
-            assisted_uuid = None
-
-            for interp in interpretations:
-                if interp.get("name") == "Assisted":
-                    assisted_uuid = interp.get("uuid")
-                    logger.info(f"✓ Found Assisted interpretation: {assisted_uuid}")
-                    break
-
-            if not assisted_uuid:
-                raise ValueError("Assisted interpretation not created after COPY_INTERPRETATION")
+            # Wait for Assisted to appear in list (polling 0.3s x 20 = max 6s)
+            assisted_uuid = self._wait_for_interpretation_in_list("Assisted")
 
         # SELECT_INTERPRETATION (Assisted)
         logger.info("Selecting Assisted interpretation...")
@@ -1101,8 +1194,8 @@ class StarSteerSlicerOrchestrator:
             "interpretationUuid": assisted_uuid
         })
 
-        # Wait for selection
-        time.sleep(1)
+        # Wait for interpretation to become active
+        self._wait_for_interpretation_active(assisted_uuid)
 
         logger.info(f"✓ Interpretation copied and selected: {assisted_uuid}")
         return assisted_uuid
@@ -1971,29 +2064,17 @@ class StarSteerSlicerOrchestrator:
                 "sourceInterpretationUuid": ref_interp_uuid,
                 "targetInterpretationName": ng_interp_name
             })
-            time.sleep(0.5)
 
-            # Find NG_Interpretation UUID
-            interp_list_file = self.starsteer_dir / "interpretations_list.json"
-            with open(interp_list_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
-            ng_uuid = None
-            for interp in data.get("interpretations", []):
-                if interp.get("name") == ng_interp_name:
-                    ng_uuid = interp.get("uuid")
-                    break
-
-            if not ng_uuid:
-                logger.error(f"{ng_interp_name} not found after COPY_INTERPRETATION")
-                return
-
+            # Wait for interpretation to appear in list (polling 0.3s x 20 = max 6s)
+            ng_uuid = self._wait_for_interpretation_in_list(ng_interp_name)
             logger.info(f"✓ {ng_interp_name} created: {ng_uuid}")
 
             # Step 3: SELECT_INTERPRETATION
             logger.info(f"Step 3: Selecting {ng_interp_name}")
             self._send_command("SELECT_INTERPRETATION", {"interpretationUuid": ng_uuid})
-            time.sleep(0.2)
+
+            # Wait for interpretation to become active
+            self._wait_for_interpretation_active(ng_uuid)
 
             # Step 3.5: Configure AG settings (useGridSlice: false for no grid)
             logger.info("Step 3.5: Configuring AG settings (useGridSlice: false)")
@@ -2010,6 +2091,9 @@ class StarSteerSlicerOrchestrator:
             # Step 4: START_AG
             logger.info("Step 4: Starting AG on source well")
             self._send_command("START_AG", {}, timeout=60)
+
+            # Wait for AG to start running
+            self._wait_for_ag_running()
 
             # Step 5: Rewrite interpretation.json to trigger QFileSystemWatcher
             logger.info("Step 5: Triggering interpretation.json update")
