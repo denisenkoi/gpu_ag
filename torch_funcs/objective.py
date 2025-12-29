@@ -22,7 +22,8 @@ def objective_function_torch(
     angle_range,
     angle_sum_power,
     min_pearson_value,
-    tvd_to_typewell_shift=0.0
+    tvd_to_typewell_shift=0.0,
+    prev_segment_angle=None
 ):
     """
     Objective function for DE optimization (torch version, single evaluation).
@@ -40,6 +41,7 @@ def objective_function_torch(
         angle_sum_power: power for angle sum penalty
         min_pearson_value: minimum pearson threshold
         tvd_to_typewell_shift: vertical shift
+        prev_segment_angle: angle of last frozen segment (degrees), for continuity penalty
 
     Returns:
         tensor: metric value (lower is better)
@@ -61,11 +63,27 @@ def objective_function_torch(
     else:
         angle_violation_penalty = torch.tensor(0.0, device=device, dtype=dtype)
 
-    # Angle sum penalty
-    if len(angles) > 1:
-        angle_diffs = torch.abs(angles[1:] - angles[:-1])
-        angle_sum = torch.sum(angle_diffs)
-        angle_sum_penalty = angle_sum ** angle_sum_power
+    # Angle sum penalty (includes transition from prev_segment to first optimized)
+    if len(angles) >= 1:
+        # Collect all angle differences
+        all_diffs = []
+
+        # First: transition from prev_segment_angle to first optimized segment
+        if prev_segment_angle is not None:
+            prev_angle_tensor = torch.tensor(prev_segment_angle, device=device, dtype=dtype)
+            first_diff = torch.abs(angles[0] - prev_angle_tensor)
+            all_diffs.append(first_diff)
+
+        # Then: differences between optimized segments
+        if len(angles) > 1:
+            segment_diffs = torch.abs(angles[1:] - angles[:-1])
+            all_diffs.append(segment_diffs)
+
+        if all_diffs:
+            angle_sum = sum(d.sum() if d.dim() > 0 else d for d in all_diffs)
+            angle_sum_penalty = angle_sum ** angle_sum_power
+        else:
+            angle_sum_penalty = torch.tensor(0.0, device=device, dtype=dtype)
     else:
         angle_sum_penalty = torch.tensor(0.0, device=device, dtype=dtype)
 

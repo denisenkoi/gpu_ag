@@ -192,6 +192,15 @@ class StarSteerSlicerOrchestrator:
         wells_to_process = self._load_wells_config()
         logger.info(f"Found {len(wells_to_process)} wells with process=true")
 
+        # Filter by --well if specified
+        single_well = _CLI_CONFIG.get('single_well')
+        if single_well:
+            wells_to_process = [w for w in wells_to_process if w.get('well_name') == single_well or w.get('name') == single_well]
+            if not wells_to_process:
+                logger.error(f"Well not found: {single_well}")
+                return
+            logger.info(f"Filtering to single well: {single_well}")
+
         # Step 2: Load wells_list.json ONCE
         logger.info("Loading wells list from StarSteer...")
         wells_uuid_map = self._load_wells_uuid_map()
@@ -2171,6 +2180,20 @@ Examples:
         help='Optimizer algorithm (default: from GPU_ALGORITHM env, or cmaes). Options: cmaes, montecarlo, snes, de'
     )
 
+    parser.add_argument(
+        '--well',
+        type=str,
+        default=None,
+        help='Process only this well (e.g., Well162~EGFDL)'
+    )
+
+    parser.add_argument(
+        '--dump-input',
+        type=str,
+        default=None,
+        help='Dump well_data to JSON after specified iteration (e.g., --dump-input 1)'
+    )
+
     return parser.parse_args()
 
 
@@ -2208,6 +2231,11 @@ def main():
     if args.optimizer:
         os.environ['GPU_ALGORITHM'] = args.optimizer.upper()
         logger.info(f"Optimizer algorithm: {args.optimizer.upper()}")
+
+    # Single well filter
+    if args.well:
+        _CLI_CONFIG['single_well'] = args.well
+        logger.info(f"Single well mode: {args.well}")
 
     logger.info("Starting StarSteer Slicer Orchestrator")
 

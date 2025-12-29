@@ -171,9 +171,8 @@ def optimizer_fit(well,
     # Генерируем результаты с основным оптимальным решением
     results = [(corr, self_correlation, pearson, mse, num_points, optimal_segments, well_copy)]
 
-    # Сохраняем статистику оптимизации в первом результате
-    if len(results) > 0 and hasattr(results[0][6], 'optimization_stats'):
-        results[0][6].optimization_stats = optimization_stats
+    # Сохраняем статистику оптимизации в well объекте
+    results[0][6].optimization_stats = optimization_stats
 
     # Генерируем дополнительные результаты с небольшими возмущениями вокруг оптимального результата
     for _ in range(min(num_iterations - 1, 9)):  # Ограничиваем до 9 дополнительных результатов для эффективности
