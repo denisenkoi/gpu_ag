@@ -278,6 +278,7 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         self.interpretation = None
         self.ag_well = None
         self.ag_typewell = None
+        self.ag_typewell_raw = None  # Unnormalized typewell for re-normalization on update
         self.tvd_to_typewell_shift = None
         self.well_name = None
         self.start_idx = None
@@ -867,7 +868,7 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
 
         # Create AG objects (with pseudoTypeLog support)
         self.ag_well = Well(well_data)
-        self.ag_typewell = self._create_typewell(well_data)
+        self.ag_typewell_raw = self._create_typewell(well_data)  # Store raw for re-normalization
         self.tvd_to_typewell_shift = self._get_tvd_shift(well_data)
 
         # Get start MD BEFORE normalization
@@ -892,6 +893,8 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                     f"fixed_md_range={self.fixed_md_range:.2f}")
 
         # Normalize with fixed md_range
+        # Create normalized copy of typewell (raw is kept for re-normalization on update)
+        self.ag_typewell = deepcopy(self.ag_typewell_raw)
         max_curve_value = max(self.ag_well.max_curve, self.ag_typewell.value.max())
         self.ag_well.normalize(max_curve_value, self.ag_typewell.min_depth, self.fixed_md_range)
         self.ag_typewell.normalize(max_curve_value, self.ag_well.min_depth, self.fixed_md_range)
@@ -980,8 +983,11 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         assert self.interpretation is not None, "Well not initialized"
 
         updated_well = Well(well_data)
+        # Re-normalize typewell with new max_curve_value to keep consistent scaling
+        self.ag_typewell = deepcopy(self.ag_typewell_raw)
         max_curve_value = max(updated_well.max_curve, self.ag_typewell.value.max())
         updated_well.normalize(max_curve_value, self.ag_typewell.min_depth, self.fixed_md_range)
+        self.ag_typewell.normalize(max_curve_value, updated_well.min_depth, self.fixed_md_range)
         self.ag_well = updated_well
 
         current_md = updated_well.measured_depth[-1]

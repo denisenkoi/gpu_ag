@@ -2159,8 +2159,8 @@ Examples:
     parser.add_argument(
         '--max-iterations',
         type=int,
-        default=None,
-        help='Maximum slicing iterations (default: 1 for DE mode, 1000 for EXE mode)'
+        default=100000,
+        help='Maximum slicing iterations (default: 100000)'
     )
 
     parser.add_argument(
@@ -2192,9 +2192,9 @@ def main():
         os.environ['PYTHON_EXECUTOR_ENABLED'] = 'true'
         _CLI_CONFIG['python_executor'] = True
         # 0 means unlimited (use large number), None means default to 1
-        _CLI_CONFIG['max_iterations'] = args.max_iterations if args.max_iterations is not None else 1
+        _CLI_CONFIG['max_iterations'] = args.max_iterations
         if _CLI_CONFIG['max_iterations'] == 0:
-            _CLI_CONFIG['max_iterations'] = 10000  # effectively unlimited
+            _CLI_CONFIG['max_iterations'] = 100000  # effectively unlimited
         logger.info("=" * 60)
         logger.info("DE MODE: Python Differential Evolution optimizer")
         logger.info(f"  Max iterations: {_CLI_CONFIG['max_iterations']}")
