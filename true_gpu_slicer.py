@@ -417,11 +417,18 @@ def run_slicing(data: Dict[str, Any], executor: GpuAutoGeosteeringExecutor,
     }
 
 
-def compare_with_reference(result: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]:
+def compare_with_reference(result: Dict[str, Any], data: Dict[str, Any], md_step: float = 1.0) -> Dict[str, Any]:
     """
     Compare slicing result with reference interpretation.
 
-    Returns metrics dict.
+    Uses interpolation to common MD grid for accurate comparison.
+
+    Args:
+        result: Slicing result with interpretation
+        data: Well data with reference interpretation
+        md_step: MD grid step for interpolation (default 1m)
+
+    Returns metrics dict with MAE, RMSE, endpoint_error.
     """
     ref_mds = data['ref_segment_mds'].cpu().numpy()
     ref_shifts = data['ref_shifts'].cpu().numpy()
@@ -430,26 +437,54 @@ def compare_with_reference(result: Dict[str, Any], data: Dict[str, Any]) -> Dict
         logger.warning("No reference interpretation for comparison")
         return {'error': 'no_reference'}
 
-    # Get final interpretation shifts
+    # Get final interpretation
     final_segments = result['interpretation']
     if not final_segments:
         return {'error': 'no_result_segments'}
 
-    # Compare end shifts
-    result_shifts = [seg['endShift'] for seg in final_segments]
+    # Extract our MDs and shifts
+    our_mds = np.array([seg['endMd'] for seg in final_segments])
+    our_shifts = np.array([seg['endShift'] for seg in final_segments])
 
-    # Simple MAE on overlapping region
-    n_compare = min(len(result_shifts), len(ref_shifts))
-    if n_compare == 0:
+    if len(our_mds) == 0:
+        return {'error': 'no_result_segments'}
+
+    # Find common MD range
+    md_min = max(ref_mds[0], our_mds[0])
+    md_max = min(ref_mds[-1], our_mds[-1])
+
+    if md_max <= md_min:
         return {'error': 'no_overlap'}
 
-    mae = np.mean(np.abs(np.array(result_shifts[:n_compare]) - ref_shifts[:n_compare]))
+    # Create common MD grid
+    common_mds = np.arange(md_min, md_max + md_step, md_step)
+
+    # Interpolate both to common grid
+    ref_interp = np.interp(common_mds, ref_mds, ref_shifts)
+    our_interp = np.interp(common_mds, our_mds, our_shifts)
+
+    # Calculate metrics
+    diffs = our_interp - ref_interp
+    mae = np.mean(np.abs(diffs))
+    rmse = np.sqrt(np.mean(diffs ** 2))
+    max_error = np.max(np.abs(diffs))
+    max_error_md = common_mds[np.argmax(np.abs(diffs))]
+
+    # Endpoint error (at last reference MD)
+    endpoint_our = np.interp(ref_mds[-1], our_mds, our_shifts)
+    endpoint_error = endpoint_our - ref_shifts[-1]
 
     return {
-        'mae_shifts': float(mae),
-        'n_result_segments': len(result_shifts),
-        'n_ref_segments': len(ref_shifts),
-        'n_compared': n_compare
+        'mae': float(mae),
+        'rmse': float(rmse),
+        'max_error': float(max_error),
+        'max_error_md': float(max_error_md),
+        'endpoint_error': float(endpoint_error),
+        'endpoint_md': float(ref_mds[-1]),
+        'n_points_compared': len(common_mds),
+        'md_range': [float(md_min), float(md_max)],
+        'n_result_segments': len(our_mds),
+        'n_ref_segments': len(ref_mds)
     }
 
 
@@ -583,8 +618,10 @@ def main():
                         logger.error(f"Error processing {well_name}: {result['error']}")
                     else:
                         all_results.append(result)
+                        m = result['metrics']
                         logger.info(f"Completed {well_name}: {result['iterations']} iters, "
-                                    f"{result['total_time']:.1f}s, MAE={result['metrics'].get('mae_shifts', 'N/A'):.2f}m")
+                                    f"{result['total_time']:.1f}s, MAE={m.get('mae', 0):.2f}m, "
+                                    f"RMSE={m.get('rmse', 0):.2f}m, endpoint={m.get('endpoint_error', 0):+.2f}m")
                 except Exception as e:
                     logger.error(f"Worker error for {well_name}: {e}")
     else:
@@ -613,8 +650,9 @@ def main():
                 result['metrics'] = metrics
                 all_results.append(result)
 
-                logger.info(f"Completed {well_name}: {result['iterations']} iterations, "
-                            f"{result['total_time']:.1f}s total, MAE={metrics.get('mae_shifts', 'N/A')}")
+                logger.info(f"Completed {well_name}: {result['iterations']} iters, "
+                            f"{result['total_time']:.1f}s, MAE={metrics.get('mae', 0):.2f}m, "
+                            f"RMSE={metrics.get('rmse', 0):.2f}m, endpoint={metrics.get('endpoint_error', 0):+.2f}m")
 
             except Exception as e:
                 logger.error(f"Error processing {well_name}: {e}")
@@ -635,12 +673,42 @@ def main():
         print(f"Total iterations: {total_iters}")
         print(f"Total time: {total_time:.1f}s")
 
-        # MAE stats
-        maes = [r['metrics'].get('mae_shifts') for r in all_results
-                if r['metrics'].get('mae_shifts') is not None]
+        # Collect metrics
+        maes = [r['metrics'].get('mae') for r in all_results if r['metrics'].get('mae') is not None]
+        rmses = [r['metrics'].get('rmse') for r in all_results if r['metrics'].get('rmse') is not None]
+        endpoints = [r['metrics'].get('endpoint_error') for r in all_results if r['metrics'].get('endpoint_error') is not None]
+
         if maes:
-            print(f"MAE shifts: mean={np.mean(maes):.2f}m, "
-                  f"min={np.min(maes):.2f}m, max={np.max(maes):.2f}m")
+            print(f"MAE: mean={np.mean(maes):.2f}m, min={np.min(maes):.2f}m, max={np.max(maes):.2f}m")
+        if rmses:
+            overall_rmse = np.sqrt(np.mean(np.array(rmses)**2))
+            print(f"RMSE: mean={np.mean(rmses):.2f}m, overall={overall_rmse:.2f}m")
+        if endpoints:
+            endpoint_rmse = np.sqrt(np.mean(np.array(endpoints)**2))
+            print(f"Endpoint errors: mean={np.mean(endpoints):+.2f}m, RMSE={endpoint_rmse:.2f}m")
+
+        # Save results to CSV
+        csv_path = results_dir / 'metrics_summary.csv'
+        import csv
+        with open(csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['well_name', 'iterations', 'time_s', 'mae_m', 'rmse_m', 'max_error_m',
+                             'max_error_md', 'endpoint_error_m', 'endpoint_md', 'n_segments'])
+            for r in sorted(all_results, key=lambda x: x['metrics'].get('mae', 0), reverse=True):
+                m = r['metrics']
+                writer.writerow([
+                    r['well_name'],
+                    r['iterations'],
+                    f"{r['total_time']:.1f}",
+                    f"{m.get('mae', 0):.3f}",
+                    f"{m.get('rmse', 0):.3f}",
+                    f"{m.get('max_error', 0):.3f}",
+                    f"{m.get('max_error_md', 0):.1f}",
+                    f"{m.get('endpoint_error', 0):.3f}",
+                    f"{m.get('endpoint_md', 0):.1f}",
+                    m.get('n_result_segments', 0)
+                ])
+        print(f"\nResults saved to: {csv_path}")
 
 
 if __name__ == '__main__':
