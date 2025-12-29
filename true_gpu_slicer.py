@@ -23,8 +23,10 @@ import logging
 import argparse
 import time
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from copy import deepcopy
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing as mp
 
 # Add paths
 sys.path.insert(0, str(Path(__file__).parent))
@@ -37,6 +39,11 @@ except ImportError:
     pass  # dotenv is optional
 
 from gpu_executor import GpuAutoGeosteeringExecutor
+from cpu_baseline.typewell_provider import extend_pseudo_with_typelog
+
+# Normalization mode: 'OLD' = type×(1/mult), pseudo raw
+#                     'NEW' = pseudo×mult, type raw
+NORMALIZATION_MODE = os.getenv('NORMALIZATION_MODE', 'OLD')
 
 logging.basicConfig(
     level=logging.INFO,
@@ -95,6 +102,50 @@ def tensor_to_typelog_points(tvd: torch.Tensor, gr: torch.Tensor) -> List[Dict]:
     return points
 
 
+def stitch_typewell_at_runtime(data: Dict[str, Any], mode: str = 'OLD') -> List[Dict]:
+    """
+    Stitch pseudo + type at runtime with normalization.
+
+    Args:
+        data: Well data from dataset (contains pseudo_tvd, pseudo_gr, type_tvd, type_gr, norm_multiplier)
+        mode: 'OLD' = type×(1/mult), pseudo raw
+              'NEW' = pseudo×mult, type raw
+
+    Returns:
+        Stitched typeLog tvdSortedPoints
+    """
+    norm_multiplier = data.get('norm_multiplier', 1.0)
+
+    # Get raw data
+    pseudo_tvd = data['pseudo_tvd'].cpu().numpy()
+    pseudo_gr = data['pseudo_gr'].cpu().numpy()
+    type_tvd = data['type_tvd'].cpu().numpy()
+    type_gr = data['type_gr'].cpu().numpy()
+
+    # Build dict format for extend_pseudo_with_typelog
+    pseudo_dict = {
+        'tvdSortedPoints': [{'trueVerticalDepth': float(tvd), 'data': float(gr)}
+                           for tvd, gr in zip(pseudo_tvd, pseudo_gr)]
+    }
+    type_dict = {
+        'tvdSortedPoints': [{'trueVerticalDepth': float(tvd), 'data': float(gr)}
+                           for tvd, gr in zip(type_tvd, type_gr)]
+    }
+
+    if mode == 'NEW':
+        # NEW: pseudo × mult, type raw
+        if norm_multiplier != 1.0:
+            for p in pseudo_dict['tvdSortedPoints']:
+                p['data'] *= norm_multiplier
+        stitched = extend_pseudo_with_typelog(pseudo_dict, type_dict, norm_coef=1.0)
+    else:
+        # OLD: pseudo raw, type × (1/mult)
+        norm_coef = 1.0 / norm_multiplier if norm_multiplier != 0 else 1.0
+        stitched = extend_pseudo_with_typelog(pseudo_dict, type_dict, norm_coef=norm_coef)
+
+    return stitched.get('tvdSortedPoints', [])
+
+
 def slice_data_to_md(data: Dict[str, Any], current_md: float) -> Dict[str, Any]:
     """
     Slice RAW well data to current_md (truncate arrays).
@@ -145,12 +196,9 @@ def slice_data_to_md(data: Dict[str, Any], current_md: float) -> Dict[str, Any]:
             'points': tensor_to_welllog_points(log_md_sliced, log_gr_sliced)
         },
 
-        # Typewell is pre-stitched in dataset - use as-is (StarSteer doesn't multiply typewell)
+        # Stitch pseudo+type at runtime with selected normalization mode
         'typeLog': {
-            'tvdSortedPoints': tensor_to_typelog_points(
-                data['typewell_tvd'],
-                data['typewell_gr']
-            )
+            'tvdSortedPoints': stitch_typewell_at_runtime(data, mode=NORMALIZATION_MODE)
         },
 
         # When USE_PSEUDOTYPELOG=true, tvd_shift is always 0 (as in StarSteer)
@@ -413,6 +461,43 @@ def load_dataset(path: Path) -> Dict[str, Dict]:
     return dataset
 
 
+def process_well_worker(args: Tuple) -> Dict[str, Any]:
+    """
+    Worker function for multiprocessing. Processes a single well.
+    Each worker initializes its own GPU executor.
+    """
+    well_name, well_data, slice_step, work_dir, results_dir, algorithm = args
+
+    # Import here to avoid issues with multiprocessing
+    from gpu_executor import GpuAutoGeosteeringExecutor
+
+    # Each worker creates its own executor
+    executor = GpuAutoGeosteeringExecutor(
+        work_dir=work_dir,
+        results_dir=results_dir
+    )
+    if algorithm:
+        executor.set_algorithm(algorithm)
+    executor.start_daemon()
+
+    try:
+        well_data['well_name'] = well_name
+        result = run_slicing(well_data, executor, slice_step)
+        metrics = compare_with_reference(result, well_data)
+        result['metrics'] = metrics
+        result['well_name'] = well_name
+        return result
+    except Exception as e:
+        import traceback
+        return {
+            'well_name': well_name,
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }
+    finally:
+        executor.stop_daemon()
+
+
 def main():
     parser = argparse.ArgumentParser(description='True GPU Slicer - pure Python slicing')
     parser.add_argument('--dataset', type=str,
@@ -429,6 +514,12 @@ def main():
                         help='Directory for results')
     parser.add_argument('--algorithm', type=str, default=None,
                         help='Override algorithm (DE, CMAES, SNES, etc.)')
+    parser.add_argument('--worker', type=int, default=0,
+                        help='Worker index for parallel runs (0-based)')
+    parser.add_argument('--total-workers', type=int, default=1,
+                        help='Total number of parallel workers')
+    parser.add_argument('--num-workers', type=int, default=1,
+                        help='Number of parallel workers within single process (multiprocessing)')
 
     args = parser.parse_args()
 
@@ -451,55 +542,86 @@ def main():
             sys.exit(1)
         wells_to_process = [args.well]
     elif args.all:
-        wells_to_process = list(dataset.keys())
+        all_wells = sorted(dataset.keys())  # Sort for consistent ordering across workers
+        # Distribute wells across workers: worker i gets wells i, i+n, i+2n, ...
+        if args.total_workers > 1:
+            wells_to_process = [w for i, w in enumerate(all_wells) if i % args.total_workers == args.worker]
+            logger.info(f"Worker {args.worker}/{args.total_workers}: processing {len(wells_to_process)} wells")
+        else:
+            wells_to_process = all_wells
     else:
         # Default: first well
         wells_to_process = [list(dataset.keys())[0]]
         logger.info(f"No well specified, using first well: {wells_to_process[0]}")
 
-    # Create executor
+    # Setup directories
     work_dir = str(results_dir / "work")
     Path(work_dir).mkdir(parents=True, exist_ok=True)
-
-    executor = GpuAutoGeosteeringExecutor(
-        work_dir=work_dir,
-        results_dir=str(results_dir)
-    )
-
-    if args.algorithm:
-        executor.set_algorithm(args.algorithm)
-
-    executor.start_daemon()
 
     # Process wells
     all_results = []
 
-    for well_name in wells_to_process:
-        logger.info(f"\n{'='*60}")
-        logger.info(f"Processing: {well_name}")
-        logger.info(f"{'='*60}")
+    if args.num_workers > 1:
+        # Multiprocessing mode
+        logger.info(f"Using {args.num_workers} parallel workers")
+        mp.set_start_method('spawn', force=True)
 
-        data = dataset[well_name]
-        data['well_name'] = well_name  # Add name to data
+        # Prepare args for workers
+        worker_args = [
+            (well_name, dataset[well_name], args.slice_step, work_dir, str(results_dir), args.algorithm)
+            for well_name in wells_to_process
+        ]
 
-        try:
-            result = run_slicing(data, executor, args.slice_step)
+        with ProcessPoolExecutor(max_workers=args.num_workers) as pool:
+            futures = {pool.submit(process_well_worker, arg): arg[0] for arg in worker_args}
 
-            # Compare with reference
-            metrics = compare_with_reference(result, data)
-            result['metrics'] = metrics
+            for future in as_completed(futures):
+                well_name = futures[future]
+                try:
+                    result = future.result()
+                    if 'error' in result:
+                        logger.error(f"Error processing {well_name}: {result['error']}")
+                    else:
+                        all_results.append(result)
+                        logger.info(f"Completed {well_name}: {result['iterations']} iters, "
+                                    f"{result['total_time']:.1f}s, MAE={result['metrics'].get('mae_shifts', 'N/A'):.2f}m")
+                except Exception as e:
+                    logger.error(f"Worker error for {well_name}: {e}")
+    else:
+        # Single process mode (original)
+        executor = GpuAutoGeosteeringExecutor(
+            work_dir=work_dir,
+            results_dir=str(results_dir)
+        )
 
-            all_results.append(result)
+        if args.algorithm:
+            executor.set_algorithm(args.algorithm)
 
-            logger.info(f"Completed {well_name}: {result['iterations']} iterations, "
-                        f"{result['total_time']:.1f}s total, MAE={metrics.get('mae_shifts', 'N/A')}")
+        executor.start_daemon()
 
-        except Exception as e:
-            logger.error(f"Error processing {well_name}: {e}")
-            import traceback
-            traceback.print_exc()
+        for well_name in wells_to_process:
+            logger.info(f"\n{'='*60}")
+            logger.info(f"Processing: {well_name}")
+            logger.info(f"{'='*60}")
 
-    executor.stop_daemon()
+            data = dataset[well_name]
+            data['well_name'] = well_name
+
+            try:
+                result = run_slicing(data, executor, args.slice_step)
+                metrics = compare_with_reference(result, data)
+                result['metrics'] = metrics
+                all_results.append(result)
+
+                logger.info(f"Completed {well_name}: {result['iterations']} iterations, "
+                            f"{result['total_time']:.1f}s total, MAE={metrics.get('mae_shifts', 'N/A')}")
+
+            except Exception as e:
+                logger.error(f"Error processing {well_name}: {e}")
+                import traceback
+                traceback.print_exc()
+
+        executor.stop_daemon()
 
     # Summary
     print(f"\n{'='*60}")

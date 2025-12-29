@@ -63,6 +63,32 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
+def _multiply_typelog_data(typelog: dict, multiplier: float) -> dict:
+    """Multiply typelog data values by multiplier (creates a copy)"""
+    if multiplier == 1.0:
+        return typelog
+
+    result = {
+        'tvdSortedPoints': [],
+        'points': [],
+        'uuid': typelog.get('uuid', '')
+    }
+
+    for p in typelog.get('tvdSortedPoints', []):
+        new_p = dict(p)
+        if new_p.get('data') is not None:
+            new_p['data'] = new_p['data'] * multiplier
+        result['tvdSortedPoints'].append(new_p)
+
+    for p in typelog.get('points', []):
+        new_p = dict(p)
+        if new_p.get('data') is not None:
+            new_p['data'] = new_p['data'] * multiplier
+        result['points'].append(new_p)
+
+    return result
+
+
 def create_landing_detector() -> LandingDetector:
     """Create LandingDetector with params from .env"""
     return LandingDetector(
@@ -208,21 +234,31 @@ def process_single_json(json_path: Path, device: str = 'cpu',
         if landing_norm and landing_norm.get('norm_multiplier'):
             norm_multiplier = landing_norm['norm_multiplier']
 
-        # Stitch pseudoTypeLog + typeLog with norm_coef = 1/multiplier
+        # Store RAW pseudoTypeLog and typeLog separately (no stitching, no normalization)
         pseudo_typelog = json_data.get('pseudoTypeLog', None)
         type_log = json_data.get('typeLog', None)
 
-        if pseudo_typelog and type_log and norm_multiplier != 0:
-            norm_coef = 1.0 / norm_multiplier
-            stitched_typelog = extend_pseudo_with_typelog(pseudo_typelog, type_log, norm_coef)
-        elif pseudo_typelog:
-            stitched_typelog = pseudo_typelog
-        else:
-            stitched_typelog = type_log
+        # Convert pseudo to numpy (RAW) - filter out None values
+        pseudo_tvd = np.array([], dtype=np.float64)
+        pseudo_gr = np.array([], dtype=np.float64)
+        if pseudo_typelog:
+            pseudo_points = pseudo_typelog.get('tvdSortedPoints', pseudo_typelog.get('points', []))
+            # Filter points with valid data
+            valid_pseudo = [(p['trueVerticalDepth'], p['data']) for p in pseudo_points if p.get('data') is not None]
+            if valid_pseudo:
+                pseudo_tvd = np.array([p[0] for p in valid_pseudo], dtype=np.float64)
+                pseudo_gr = np.array([p[1] for p in valid_pseudo], dtype=np.float64)
 
-        # Create TypeWell from stitched data
-        typewell = TypeWell({'typeLog': stitched_typelog})
-        typewell_np = typewell_to_numpy(typewell)
+        # Convert type to numpy (RAW) - filter out None values
+        type_tvd = np.array([], dtype=np.float64)
+        type_gr = np.array([], dtype=np.float64)
+        if type_log:
+            type_points = type_log.get('tvdSortedPoints', type_log.get('points', []))
+            # Filter points with valid data
+            valid_type = [(p['trueVerticalDepth'], p['data']) for p in type_points if p.get('data') is not None]
+            if valid_type:
+                type_tvd = np.array([p[0] for p in valid_type], dtype=np.float64)
+                type_gr = np.array([p[1] for p in valid_type], dtype=np.float64)
 
         # Extract reference interpretation
         ref_mds, ref_shifts = extract_ref_shifts(json_data)
@@ -253,9 +289,13 @@ def process_single_json(json_path: Path, device: str = 'cpu',
             'log_md': torch.tensor(raw_log_md, dtype=torch.float64, device=device),
             'log_gr': torch.tensor(raw_log_gr, dtype=torch.float64, device=device),
 
-            # Stitched typewell (pseudo + type with norm_coef = 1/multiplier)
-            'typewell_tvd': torch.tensor(typewell_np['tvd'], dtype=torch.float64, device=device),
-            'typewell_gr': torch.tensor(typewell_np['value'], dtype=torch.float64, device=device),
+            # RAW pseudoTypeLog (for stitching at runtime)
+            'pseudo_tvd': torch.tensor(pseudo_tvd, dtype=torch.float64, device=device),
+            'pseudo_gr': torch.tensor(pseudo_gr, dtype=torch.float64, device=device),
+
+            # RAW typeLog (for stitching at runtime)
+            'type_tvd': torch.tensor(type_tvd, dtype=torch.float64, device=device),
+            'type_gr': torch.tensor(type_gr, dtype=torch.float64, device=device),
 
             # Reference interpretation
             'ref_segment_mds': torch.tensor(ref_mds, dtype=torch.float64, device=device),
@@ -266,8 +306,7 @@ def process_single_json(json_path: Path, device: str = 'cpu',
             'lateral_well_last_md': lateral_well_last_md,
             'is_log_normalization_enabled': is_log_normalization_enabled,
             'tvd_typewell_shift': tvd_typewell_shift,
-            'typewell_step': typewell_np['typewell_step'],
-            'typewell_min_depth': typewell_np['min_depth'],
+            'norm_multiplier': norm_multiplier,
         }
 
         # Add landing and normalization if calculated
@@ -392,13 +431,11 @@ def main():
         print(f"\nSample well: {sample_name}")
         print(f"  Well trajectory points: {len(sample['well_md'])}")
         print(f"  WellLog points: {len(sample['log_md'])}")
-        print(f"  Typewell points: {len(sample['typewell_tvd'])}")
+        print(f"  PseudoTypeLog points: {len(sample['pseudo_tvd'])}")
+        print(f"  TypeLog points: {len(sample['type_tvd'])}")
         print(f"  Reference segments: {len(sample['ref_shifts'])}")
         print(f"  start_md: {sample['start_md']:.2f}")
-        print(f"  perch_md: {sample.get('perch_md', 'N/A')}")
-        print(f"  norm_multiplier: {sample.get('norm_multiplier', 'N/A')}")
-        print(f"  norm_shift: {sample.get('norm_shift', 'N/A')}")
-        print(f"  norm_status: {sample.get('norm_status', 'N/A')}")
+        print(f"  norm_multiplier: {sample.get('norm_multiplier', 1.0)}")
 
 
 if __name__ == '__main__':
