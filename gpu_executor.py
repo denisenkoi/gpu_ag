@@ -488,7 +488,7 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
             num_intervals_self_correlation=self.num_intervals_self_correlation,
             sc_power=self.sc_power,
             angle_range=self.angle_range,
-            angle_sum_power=2.0,
+            angle_sum_power=float(os.getenv('PYTHON_ANGLE_SUM_POWER', '2.0')),
             min_pearson_value=self.min_pearson_value,
             tvd_to_typewell_shift=self.tvd_to_typewell_shift,
             prev_segment_angle=prev_segment_angle,

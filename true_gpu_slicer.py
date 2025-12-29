@@ -247,6 +247,8 @@ def build_manual_interpretation_to_md(data: Dict[str, Any], target_md: float) ->
     """
     Build manual interpretation segments from ref_shifts up to target_md.
 
+    ref_segment_mds[i] and ref_shifts[i] are the END point of segment i.
+
     Args:
         data: Well data with ref_segment_mds and ref_shifts
         target_md: MD to build interpretation up to
@@ -260,17 +262,25 @@ def build_manual_interpretation_to_md(data: Dict[str, Any], target_md: float) ->
     if len(ref_mds) == 0:
         return []
 
+    # Get start_md for first segment (from data or first ref point)
+    first_seg_start = data.get('start_md', ref_mds[0] - 100)
+
     segments = []
     for i in range(len(ref_mds)):
-        seg_start_md = float(ref_mds[i])
+        # Segment i: starts at previous end, ends at ref_mds[i]
+        if i == 0:
+            seg_start_md = float(first_seg_start)
+            start_shift = 0.0
+        else:
+            seg_start_md = float(ref_mds[i - 1])
+            start_shift = float(ref_shifts[i - 1])
+
+        seg_end_md = float(ref_mds[i])
+        end_shift = float(ref_shifts[i])
 
         # Stop if segment starts after target_md
         if seg_start_md >= target_md:
             break
-
-        seg_end_md = float(ref_mds[i + 1]) if i + 1 < len(ref_mds) else seg_start_md + 100
-        start_shift = float(ref_shifts[i - 1]) if i > 0 else 0.0
-        end_shift = float(ref_shifts[i])
 
         # Truncate last segment at target_md if needed
         if seg_end_md > target_md:
@@ -286,6 +296,10 @@ def build_manual_interpretation_to_md(data: Dict[str, Any], target_md: float) ->
             'startShift': start_shift,
             'endShift': end_shift
         })
+
+        # Stop after truncated segment
+        if seg_end_md >= target_md:
+            break
 
     return segments
 
