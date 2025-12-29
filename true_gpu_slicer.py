@@ -345,7 +345,8 @@ def interpolate_shift_at_md(data: Dict[str, Any], target_md: float) -> float:
 
 
 def run_slicing(data: Dict[str, Any], executor: GpuAutoGeosteeringExecutor,
-                slice_step: float = 30.0) -> Dict[str, Any]:
+                slice_step: float = 30.0,
+                first_slice_length: float = None) -> Dict[str, Any]:
     """
     Run incremental slicing on a single well.
 
@@ -353,10 +354,13 @@ def run_slicing(data: Dict[str, Any], executor: GpuAutoGeosteeringExecutor,
         data: Well data from dataset (with well_name added)
         executor: GPU executor instance
         slice_step: MD step between slices (meters)
+        first_slice_length: Length of first slice in meters (default: slice_step)
 
     Returns:
         Dict with final interpretation and metrics
     """
+    if first_slice_length is None:
+        first_slice_length = slice_step
     # Use wellLog MD for slicing (last GR point defines max_md)
     log_md_np = data['log_md'].cpu().numpy()
     max_md = float(log_md_np[-1])
@@ -370,7 +374,7 @@ def run_slicing(data: Dict[str, Any], executor: GpuAutoGeosteeringExecutor,
     initial_shift = interpolate_shift_at_md(data, start_md)
     logger.info(f"Initial shift at start_md={start_md:.1f}: {initial_shift:.2f}m")
 
-    current_md = start_md + slice_step  # First slice includes some data
+    current_md = start_md + first_slice_length  # First slice length (default=slice_step)
 
     # Build initial manual interpretation from ref_shifts up to start_md
     work_interpretation = build_manual_interpretation_to_md(data, start_md)
@@ -515,7 +519,13 @@ def process_well_worker(args: Tuple) -> Dict[str, Any]:
     Worker function for multiprocessing. Processes a single well.
     Each worker initializes its own GPU executor.
     """
-    well_name, well_data, slice_step, work_dir, results_dir, algorithm = args
+    well_name, well_data, slice_step, work_dir, results_dir, algorithm, first_slice_length, env_config = args
+
+    # Set env vars before importing executor (important for multiprocessing)
+    if env_config:
+        for key, value in env_config.items():
+            if value is not None:
+                os.environ[key] = str(value)
 
     # Import here to avoid issues with multiprocessing
     from gpu_executor import GpuAutoGeosteeringExecutor
@@ -531,7 +541,7 @@ def process_well_worker(args: Tuple) -> Dict[str, Any]:
 
     try:
         well_data['well_name'] = well_name
-        result = run_slicing(well_data, executor, slice_step)
+        result = run_slicing(well_data, executor, slice_step, first_slice_length)
         metrics = compare_with_reference(result, well_data)
         result['metrics'] = metrics
         result['well_name'] = well_name
@@ -569,6 +579,16 @@ def main():
                         help='Total number of parallel workers')
     parser.add_argument('--num-workers', type=int, default=1,
                         help='Number of parallel workers within single process (multiprocessing)')
+
+    # Grid search parameters
+    parser.add_argument('--first-slice-length', type=float, default=None,
+                        help='Length of first slice in meters (default: slice_step)')
+    parser.add_argument('--lookback-distance', type=float, default=None,
+                        help='Lookback distance in meters (default: from PYTHON_LOOKBACK_DISTANCE env)')
+    parser.add_argument('--max-segment-length', type=float, default=None,
+                        help='Max segment length in meters (default: from PYTHON_MAX_SEGMENT_LENGTH env)')
+    parser.add_argument('--angle-sum-power', type=float, default=None,
+                        help='Angle sum penalty power (default: from PYTHON_ANGLE_SUM_POWER env)')
 
     args = parser.parse_args()
 
@@ -616,8 +636,14 @@ def main():
         mp.set_start_method('spawn', force=True)
 
         # Prepare args for workers
+        first_slice = args.first_slice_length if args.first_slice_length else args.slice_step
+        env_config = {
+            'PYTHON_LOOKBACK_DISTANCE': args.lookback_distance,
+            'PYTHON_MAX_SEGMENT_LENGTH': args.max_segment_length,
+            'PYTHON_ANGLE_SUM_POWER': args.angle_sum_power,
+        }
         worker_args = [
-            (well_name, dataset[well_name], args.slice_step, work_dir, str(results_dir), args.algorithm)
+            (well_name, dataset[well_name], args.slice_step, work_dir, str(results_dir), args.algorithm, first_slice, env_config)
             for well_name in wells_to_process
         ]
 
@@ -640,6 +666,14 @@ def main():
                     logger.error(f"Worker error for {well_name}: {e}")
     else:
         # Single process mode (original)
+        # Set env vars before creating executor
+        if args.lookback_distance:
+            os.environ['PYTHON_LOOKBACK_DISTANCE'] = str(args.lookback_distance)
+        if args.max_segment_length:
+            os.environ['PYTHON_MAX_SEGMENT_LENGTH'] = str(args.max_segment_length)
+        if args.angle_sum_power:
+            os.environ['PYTHON_ANGLE_SUM_POWER'] = str(args.angle_sum_power)
+
         executor = GpuAutoGeosteeringExecutor(
             work_dir=work_dir,
             results_dir=str(results_dir)
@@ -659,7 +693,8 @@ def main():
             data['well_name'] = well_name
 
             try:
-                result = run_slicing(data, executor, args.slice_step)
+                first_slice = args.first_slice_length if args.first_slice_length else args.slice_step
+                result = run_slicing(data, executor, args.slice_step, first_slice)
                 metrics = compare_with_reference(result, data)
                 result['metrics'] = metrics
                 all_results.append(result)
