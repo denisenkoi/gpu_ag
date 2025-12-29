@@ -23,10 +23,13 @@ logger = logging.getLogger(__name__)
 
 def extend_pseudo_with_typelog(pseudo_log: Dict, type_log: Dict, norm_coef: float = 1.0) -> Dict:
     """
-    Extend pseudoTypeLog with interpolated points from typeLog.
+    Extend pseudoTypeLog with interpolated points from typeLog in BOTH directions.
 
-    Takes points from typeLog where TVD > max(pseudo.TVD),
-    interpolates to pseudo's step size, and normalizes data.
+    Takes points from typeLog where:
+    - TVD < min(pseudo.TVD) (extend DOWN)
+    - TVD > max(pseudo.TVD) (extend UP)
+
+    Interpolates to pseudo's step size and normalizes data.
 
     Args:
         pseudo_log: PseudoTypeLog data with 'tvdSortedPoints' and 'points'
@@ -35,7 +38,7 @@ def extend_pseudo_with_typelog(pseudo_log: Dict, type_log: Dict, norm_coef: floa
                    Applied to typeLog points being added to match normalized well data.
 
     Returns:
-        Extended pseudo log with additional points from typeLog
+        Extended pseudo log with additional points from typeLog (both directions)
     """
     pseudo_points = pseudo_log.get('tvdSortedPoints', [])
     type_points = type_log.get('tvdSortedPoints', [])
@@ -45,12 +48,10 @@ def extend_pseudo_with_typelog(pseudo_log: Dict, type_log: Dict, norm_coef: floa
         return pseudo_log
 
     # Get TVD ranges
+    pseudo_min_tvd = pseudo_points[0]['trueVerticalDepth']
     pseudo_max_tvd = pseudo_points[-1]['trueVerticalDepth']
+    type_min_tvd = type_points[0]['trueVerticalDepth']
     type_max_tvd = type_points[-1]['trueVerticalDepth']
-
-    if type_max_tvd <= pseudo_max_tvd:
-        logger.info(f"typeLog TVD ({type_max_tvd:.1f}) <= pseudo TVD ({pseudo_max_tvd:.1f}), no extension needed")
-        return pseudo_log
 
     # Calculate pseudo step
     if len(pseudo_points) < 2:
@@ -58,7 +59,7 @@ def extend_pseudo_with_typelog(pseudo_log: Dict, type_log: Dict, norm_coef: floa
         return pseudo_log
     pseudo_step = pseudo_points[1]['trueVerticalDepth'] - pseudo_points[0]['trueVerticalDepth']
 
-    # Build typeLog interpolation arrays (only points after pseudo range)
+    # Build typeLog interpolation arrays (all valid points)
     type_tvd = []
     type_data = []
     for p in type_points:
@@ -67,9 +68,8 @@ def extend_pseudo_with_typelog(pseudo_log: Dict, type_log: Dict, norm_coef: floa
         # Skip points with None or non-numeric data
         if data_val is None or not isinstance(data_val, (int, float)):
             continue
-        if tvd >= pseudo_max_tvd - pseudo_step:  # Include overlap for interpolation
-            type_tvd.append(tvd)
-            type_data.append(float(data_val))
+        type_tvd.append(tvd)
+        type_data.append(float(data_val))
 
     if len(type_tvd) < 2:
         logger.warning("Not enough typeLog points for interpolation")
@@ -78,50 +78,65 @@ def extend_pseudo_with_typelog(pseudo_log: Dict, type_log: Dict, norm_coef: floa
     type_tvd = np.array(type_tvd, dtype=np.float64)
     type_data = np.array(type_data, dtype=np.float64)
 
-    # Create new TVD grid from pseudo_max_tvd to type_max_tvd with pseudo step
-    new_tvd_grid = np.arange(pseudo_max_tvd + pseudo_step, type_max_tvd + pseudo_step / 2, pseudo_step)
+    # === EXTEND DOWN (typeLog before pseudo) ===
+    new_points_down = []
+    new_points_md_down = []
+    if type_min_tvd < pseudo_min_tvd - pseudo_step:
+        # Create TVD grid from type_min to pseudo_min
+        down_tvd_grid = np.arange(type_min_tvd, pseudo_min_tvd - pseudo_step / 2, pseudo_step)
+        if len(down_tvd_grid) > 0:
+            down_data = np.interp(down_tvd_grid, type_tvd, type_data)
+            if norm_coef != 1.0:
+                down_data = down_data * norm_coef
+            for tvd, data in zip(down_tvd_grid, down_data):
+                new_points_down.append({
+                    'data': float(data),
+                    'measuredDepth': float(tvd),
+                    'trueVerticalDepth': float(tvd)
+                })
+                new_points_md_down.append({
+                    'data': float(data),
+                    'measuredDepth': float(tvd)
+                })
 
-    if len(new_tvd_grid) == 0:
-        logger.info("No new points to add (gap too small)")
+    # === EXTEND UP (typeLog after pseudo) ===
+    new_points_up = []
+    new_points_md_up = []
+    if type_max_tvd > pseudo_max_tvd + pseudo_step:
+        # Create TVD grid from pseudo_max to type_max
+        up_tvd_grid = np.arange(pseudo_max_tvd + pseudo_step, type_max_tvd + pseudo_step / 2, pseudo_step)
+        if len(up_tvd_grid) > 0:
+            up_data = np.interp(up_tvd_grid, type_tvd, type_data)
+            if norm_coef != 1.0:
+                up_data = up_data * norm_coef
+            for tvd, data in zip(up_tvd_grid, up_data):
+                new_points_up.append({
+                    'data': float(data),
+                    'measuredDepth': float(tvd),
+                    'trueVerticalDepth': float(tvd)
+                })
+                new_points_md_up.append({
+                    'data': float(data),
+                    'measuredDepth': float(tvd)
+                })
+
+    if not new_points_down and not new_points_up:
+        logger.info(f"No extension needed: typeLog [{type_min_tvd:.1f}-{type_max_tvd:.1f}] within pseudo [{pseudo_min_tvd:.1f}-{pseudo_max_tvd:.1f}]")
         return pseudo_log
 
-    # Interpolate typeLog data to new grid
-    new_data = np.interp(new_tvd_grid, type_tvd, type_data)
-
-    # Apply normalization coefficient to typeLog data
-    # norm_coef = 1.0 / multiplier, where multiplier is from NormalizationCalculator
-    # This scales typeLog to match the normalized well data
-    if norm_coef != 1.0:
-        new_data = new_data * norm_coef
-        logger.debug(f"Applied norm_coef={norm_coef:.6f} to {len(new_data)} typeLog points")
-
-    # Create new points for tvdSortedPoints
-    new_points = []
-    for tvd, data in zip(new_tvd_grid, new_data):
-        new_points.append({
-            'data': float(data),
-            'measuredDepth': float(tvd),  # Approximation: TVD ≈ MD in horizontal section
-            'trueVerticalDepth': float(tvd)
-        })
-
-    # Also extend 'points' array (MD-based)
+    # Create extended pseudo log: DOWN + pseudo + UP
     pseudo_points_md = pseudo_log.get('points', [])
-    new_points_md = []
-    for tvd, data in zip(new_tvd_grid, new_data):
-        new_points_md.append({
-            'data': float(data),
-            'measuredDepth': float(tvd)
-        })
-
-    # Create extended pseudo log
     extended_pseudo = {
-        'points': pseudo_points_md + new_points_md,
-        'tvdSortedPoints': pseudo_points + new_points,
+        'points': new_points_md_down + pseudo_points_md + new_points_md_up,
+        'tvdSortedPoints': new_points_down + pseudo_points + new_points_up,
         'uuid': pseudo_log.get('uuid', '')
     }
 
+    final_min = new_points_down[0]['trueVerticalDepth'] if new_points_down else pseudo_min_tvd
+    final_max = new_points_up[-1]['trueVerticalDepth'] if new_points_up else pseudo_max_tvd
     logger.info(f"Extended pseudoTypeLog: {len(pseudo_points)} -> {len(extended_pseudo['tvdSortedPoints'])} points, "
-                f"TVD {pseudo_max_tvd:.1f} -> {new_tvd_grid[-1]:.1f}m, norm_coef={norm_coef:.6f}")
+                f"TVD [{pseudo_min_tvd:.1f}-{pseudo_max_tvd:.1f}] -> [{final_min:.1f}-{final_max:.1f}], "
+                f"down={len(new_points_down)}, up={len(new_points_up)}, norm_coef={norm_coef:.6f}")
 
     return extended_pseudo
 

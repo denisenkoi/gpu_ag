@@ -459,6 +459,18 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         # Apply GR smoothing (uses settings from .env via gr_utils)
         well_np['value'] = apply_gr_smoothing(well_np['value'])
 
+        # DUMP after smoothing for comparison
+        dump_smoothed_path = os.getenv('DUMP_SMOOTHED_PATH')
+        if dump_smoothed_path:
+            import json
+            dump_data = {
+                'gr_smoothed_range': [float(well_np['value'].min()), float(well_np['value'].max())],
+                'gr_smoothed_len': len(well_np['value']),
+            }
+            with open(dump_smoothed_path, 'w') as f:
+                json.dump(dump_data, f, indent=2)
+            logger.info(f"DUMP smoothed: {dump_data}")
+
         typewell_np = typewell_to_numpy(self.ag_typewell)
         segments_np = segments_to_numpy(segments, self.ag_well)
 
@@ -870,6 +882,33 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         self.ag_well = Well(well_data)
         self.ag_typewell_raw = self._create_typewell(well_data)  # Store raw for re-normalization
         self.tvd_to_typewell_shift = self._get_tvd_shift(well_data)
+
+        # DUMP for comparison (before normalization)
+        dump_path = os.getenv('DUMP_WELL_DATA_PATH')
+        if dump_path:
+            import json
+            dump_data = {
+                'well_name': self.well_name,
+                'ag_well': {
+                    'md_len': len(self.ag_well.measured_depth),
+                    'md_range': [float(self.ag_well.min_md), float(self.ag_well.max_md)],
+                    'gr_len': len(self.ag_well.value),
+                    'gr_range': [float(self.ag_well.value.min()), float(self.ag_well.value.max())],
+                    'step': float(self.ag_well.horizontal_well_step),
+                },
+                'ag_typewell': {
+                    'tvd_len': len(self.ag_typewell_raw.tvd),
+                    'tvd_range': [float(self.ag_typewell_raw.tvd.min()),
+                                  float(self.ag_typewell_raw.tvd.max())],
+                    'gr_len': len(self.ag_typewell_raw.value),
+                    'gr_range': [float(self.ag_typewell_raw.value.min()),
+                                 float(self.ag_typewell_raw.value.max())],
+                },
+                'tvd_shift': float(self.tvd_to_typewell_shift),
+            }
+            with open(dump_path, 'w') as f:
+                json.dump(dump_data, f, indent=2)
+            logger.info(f"DUMP: ag_well and ag_typewell saved to {dump_path}")
 
         # Get start MD BEFORE normalization
         start_md_meters = well_data['autoGeosteeringParameters']['startMd']

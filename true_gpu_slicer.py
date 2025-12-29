@@ -30,8 +30,11 @@ from copy import deepcopy
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent / "cpu_baseline"))
 
-from dotenv import load_dotenv
-load_dotenv(Path(__file__).parent / "cpu_baseline" / ".env")
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / "cpu_baseline" / ".env")
+except ImportError:
+    pass  # dotenv is optional
 
 from gpu_executor import GpuAutoGeosteeringExecutor
 
@@ -42,23 +45,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def tensor_to_well_points(md: torch.Tensor, tvd: torch.Tensor,
-                          traj_md: torch.Tensor, traj_ns: torch.Tensor,
-                          traj_ew: torch.Tensor) -> List[Dict]:
+def tensor_to_raw_well_points(md: torch.Tensor, tvd: torch.Tensor,
+                              ns: torch.Tensor, ew: torch.Tensor) -> List[Dict]:
     """
-    Convert tensors to well points format for Well object.
-
-    Uses trajectory for NS/EW, interpolating to well MD points.
+    Convert RAW well trajectory tensors to well points format for Well object.
+    No interpolation - direct conversion.
     """
     md_np = md.cpu().numpy()
     tvd_np = tvd.cpu().numpy()
-    traj_md_np = traj_md.cpu().numpy()
-    traj_ns_np = traj_ns.cpu().numpy()
-    traj_ew_np = traj_ew.cpu().numpy()
-
-    # Interpolate NS/EW to well MD points
-    ns_np = np.interp(md_np, traj_md_np, traj_ns_np)
-    ew_np = np.interp(md_np, traj_md_np, traj_ew_np)
+    ns_np = ns.cpu().numpy()
+    ew_np = ew.cpu().numpy()
 
     points = []
     for i in range(len(md_np)):
@@ -101,56 +97,55 @@ def tensor_to_typelog_points(tvd: torch.Tensor, gr: torch.Tensor) -> List[Dict]:
 
 def slice_data_to_md(data: Dict[str, Any], current_md: float) -> Dict[str, Any]:
     """
-    Slice well data to current_md (truncate arrays).
+    Slice RAW well data to current_md (truncate arrays).
 
     Args:
-        data: Full well data from dataset
+        data: Full well data from dataset (RAW format)
         current_md: Current MD to slice to (meters)
 
     Returns:
-        Sliced well_data dict for gpu_executor
+        Sliced well_data dict for gpu_executor (JSON format)
     """
-    md = data['md'].cpu().numpy()
+    # Slice well trajectory points (well_md, well_tvd, well_ns, well_ew)
+    well_md = data['well_md'].cpu().numpy()
+    well_mask = well_md <= current_md
+    well_end_idx = max(1, well_mask.sum())
 
-    # Find index where MD <= current_md
-    mask = md <= current_md
-    end_idx = mask.sum()
+    well_md_sliced = data['well_md'][:well_end_idx]
+    well_tvd_sliced = data['well_tvd'][:well_end_idx]
+    well_ns_sliced = data['well_ns'][:well_end_idx]
+    well_ew_sliced = data['well_ew'][:well_end_idx]
 
-    if end_idx == 0:
-        end_idx = 1  # At least one point
+    # Slice wellLog points (log_md, log_gr)
+    log_md = data['log_md'].cpu().numpy()
+    log_mask = log_md <= current_md
+    log_end_idx = max(1, log_mask.sum())
 
-    # Slice tensors
-    md_sliced = data['md'][:end_idx]
-    tvd_sliced = data['tvd'][:end_idx]
-    gr_sliced = data['gr'][:end_idx]
+    log_md_sliced = data['log_md'][:log_end_idx]
+    log_gr_sliced = data['log_gr'][:log_end_idx]
 
-    # Find trajectory points up to current_md
-    traj_md = data['traj_md'].cpu().numpy()
-    traj_mask = traj_md <= current_md
-    traj_end_idx = traj_mask.sum()
-    if traj_end_idx == 0:
-        traj_end_idx = 1
+    # Apply norm_multiplier to wellLog GR (as StarSteer does)
+    norm_multiplier = data.get('norm_multiplier', 1.0)
+    if norm_multiplier and norm_multiplier != 1.0:
+        log_gr_sliced = log_gr_sliced * norm_multiplier
 
-    traj_md_sliced = data['traj_md'][:traj_end_idx]
-    traj_ns_sliced = data['traj_ns'][:traj_end_idx]
-    traj_ew_sliced = data['traj_ew'][:traj_end_idx]
-
-    # Build well_data for gpu_executor
+    # Build well_data for gpu_executor (JSON format - will be processed by Well class)
     well_data = {
         'wellName': data.get('well_name', 'Unknown'),
 
+        # RAW well trajectory points
         'well': {
-            'points': tensor_to_well_points(
-                md_sliced, tvd_sliced,
-                traj_md_sliced, traj_ns_sliced, traj_ew_sliced
+            'points': tensor_to_raw_well_points(
+                well_md_sliced, well_tvd_sliced, well_ns_sliced, well_ew_sliced
             )
         },
 
+        # RAW wellLog points
         'wellLog': {
-            'points': tensor_to_welllog_points(md_sliced, gr_sliced)
+            'points': tensor_to_welllog_points(log_md_sliced, log_gr_sliced)
         },
 
-        # Typewell is pre-stitched - use full typewell (not sliced)
+        # Typewell is pre-stitched in dataset - use as-is (StarSteer doesn't multiply typewell)
         'typeLog': {
             'tvdSortedPoints': tensor_to_typelog_points(
                 data['typewell_tvd'],
@@ -158,7 +153,8 @@ def slice_data_to_md(data: Dict[str, Any], current_md: float) -> Dict[str, Any]:
             )
         },
 
-        'tvdTypewellShift': data.get('tvd_typewell_shift', 0.0),
+        # When USE_PSEUDOTYPELOG=true, tvd_shift is always 0 (as in StarSteer)
+        'tvdTypewellShift': 0.0 if os.getenv('USE_PSEUDOTYPELOG', 'true').lower() == 'true' else data.get('tvd_typewell_shift', 0.0),
 
         'autoGeosteeringParameters': {
             'startMd': data.get('detected_start_md') or data.get('start_md', 0.0),
@@ -299,8 +295,9 @@ def run_slicing(data: Dict[str, Any], executor: GpuAutoGeosteeringExecutor,
     Returns:
         Dict with final interpretation and metrics
     """
-    md_np = data['md'].cpu().numpy()
-    max_md = float(md_np[-1])
+    # Use wellLog MD for slicing (last GR point defines max_md)
+    log_md_np = data['log_md'].cpu().numpy()
+    max_md = float(log_md_np[-1])
 
     # Get start MD (use detected_start_md if available, else start_md)
     start_md = data.get('detected_start_md') or data.get('start_md', 0.0)
@@ -419,7 +416,7 @@ def load_dataset(path: Path) -> Dict[str, Dict]:
 def main():
     parser = argparse.ArgumentParser(description='True GPU Slicer - pure Python slicing')
     parser.add_argument('--dataset', type=str,
-                        default='/mnt/e/Projects/Rogii/gpu_ag/dataset/gpu_ag_dataset.pt',
+                        default=str(Path(__file__).parent / "dataset" / "gpu_ag_dataset.pt"),
                         help='Path to PyTorch dataset')
     parser.add_argument('--well', type=str,
                         help='Single well to process (e.g., Well1002_landing~EGFDL)')
@@ -428,7 +425,7 @@ def main():
     parser.add_argument('--slice-step', type=float, default=30.0,
                         help='MD step between slices (meters)')
     parser.add_argument('--results-dir', type=str,
-                        default='/mnt/e/Projects/Rogii/gpu_ag/results/true_gpu_slicer',
+                        default=str(Path(__file__).parent / "results" / "true_gpu_slicer"),
                         help='Directory for results')
     parser.add_argument('--algorithm', type=str, default=None,
                         help='Override algorithm (DE, CMAES, SNES, etc.)')

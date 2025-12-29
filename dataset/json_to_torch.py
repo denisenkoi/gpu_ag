@@ -9,12 +9,20 @@ Usage:
 Output format:
     {
         'Well1002_landing~EGFDL': {
-            'md': tensor,           # (N,) well measured depth
-            'tvd': tensor,          # (N,) well true vertical depth
-            'vs': tensor,           # (N,) vertical section
-            'gr': tensor,           # (N,) gamma ray curve (smoothed)
+            # RAW well trajectory (from well.points) - NO Well class processing
+            'well_md': tensor,      # (N,) trajectory MD
+            'well_tvd': tensor,     # (N,) trajectory TVD
+            'well_ns': tensor,      # (N,) trajectory NorthSouth
+            'well_ew': tensor,      # (N,) trajectory EastWest
+
+            # RAW wellLog (from wellLog.points) - NO interpolation
+            'log_md': tensor,       # (L,) log measured depth
+            'log_gr': tensor,       # (L,) gamma ray values
+
+            # Stitched typewell
             'typewell_tvd': tensor, # (M,) stitched pseudo+type TVD
             'typewell_gr': tensor,  # (M,) stitched pseudo+type GR (normalized with 1/multiplier)
+
             'ref_shifts': tensor,   # (K,) reference interpretation end_shifts
             'ref_segment_mds': tensor,  # (K,) segment start MDs
             'norm_multiplier': float,   # normalization multiplier
@@ -37,12 +45,10 @@ import logging
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "cpu_baseline"))
 
-from ag_objects.ag_obj_well import Well
 from ag_objects.ag_obj_typewell import TypeWell
+from ag_objects.ag_obj_well import Well
 from ag_objects.ag_obj_interpretation import create_segments_from_json
-from numpy_funcs.converters import well_to_numpy, typewell_to_numpy
-from torch_funcs.converters import numpy_to_torch
-from gr_utils import apply_gr_smoothing
+from numpy_funcs.converters import typewell_to_numpy
 from landing_detector import LandingDetector
 from python_normalization.normalization_calculator import NormalizationCalculator
 from typewell_provider import extend_pseudo_with_typelog
@@ -182,14 +188,20 @@ def process_single_json(json_path: Path, device: str = 'cpu',
                 json_data, landing_detector, norm_calculator
             )
 
-        # Create Well object
-        well = Well(json_data)
+        # Extract RAW well data directly from JSON (no Well class processing)
+        # Well class will be used only in gpu_executor
+        well_points = json_data.get('well', {}).get('points', [])
+        welllog_points = json_data.get('wellLog', {}).get('points', [])
 
-        # Convert to numpy
-        well_np = well_to_numpy(well)
+        # Extract raw arrays from well points
+        raw_well_md = np.array([p['measuredDepth'] for p in well_points])
+        raw_well_tvd = np.array([p['trueVerticalDepth'] for p in well_points])
+        raw_well_ns = np.array([p.get('northSouth', 0.0) for p in well_points])
+        raw_well_ew = np.array([p.get('eastWest', 0.0) for p in well_points])
 
-        # Apply GR smoothing (like in gpu_executor)
-        well_np['value'] = apply_gr_smoothing(well_np['value'])
+        # Extract raw arrays from wellLog points (filter None values)
+        raw_log_md = np.array([p['measuredDepth'] for p in welllog_points if p.get('data') is not None])
+        raw_log_gr = np.array([p['data'] for p in welllog_points if p.get('data') is not None])
 
         # Get norm_multiplier for stitching (if available)
         norm_multiplier = 1.0
@@ -231,16 +243,15 @@ def process_single_json(json_path: Path, device: str = 'cpu',
 
         # Convert to torch tensors
         result = {
-            # Well data
-            'md': torch.tensor(well_np['md'], dtype=torch.float64, device=device),
-            'tvd': torch.tensor(well_np['tvd'], dtype=torch.float64, device=device),
-            'vs': torch.tensor(well_np['vs'], dtype=torch.float64, device=device),
-            'gr': torch.tensor(well_np['value'], dtype=torch.float64, device=device),
+            # RAW well trajectory data (from well.points)
+            'well_md': torch.tensor(raw_well_md, dtype=torch.float64, device=device),
+            'well_tvd': torch.tensor(raw_well_tvd, dtype=torch.float64, device=device),
+            'well_ns': torch.tensor(raw_well_ns, dtype=torch.float64, device=device),
+            'well_ew': torch.tensor(raw_well_ew, dtype=torch.float64, device=device),
 
-            # Trajectory (for future analysis)
-            'traj_md': torch.tensor(traj_md, dtype=torch.float64, device=device),
-            'traj_ns': torch.tensor(traj_ns, dtype=torch.float64, device=device),
-            'traj_ew': torch.tensor(traj_ew, dtype=torch.float64, device=device),
+            # RAW wellLog data (from wellLog.points)
+            'log_md': torch.tensor(raw_log_md, dtype=torch.float64, device=device),
+            'log_gr': torch.tensor(raw_log_gr, dtype=torch.float64, device=device),
 
             # Stitched typewell (pseudo + type with norm_coef = 1/multiplier)
             'typewell_tvd': torch.tensor(typewell_np['tvd'], dtype=torch.float64, device=device),
@@ -255,10 +266,6 @@ def process_single_json(json_path: Path, device: str = 'cpu',
             'lateral_well_last_md': lateral_well_last_md,
             'is_log_normalization_enabled': is_log_normalization_enabled,
             'tvd_typewell_shift': tvd_typewell_shift,
-            'md_range': well_np['md_range'],
-            'min_curve': well_np['min_curve'],
-            'max_curve': well_np['max_curve'],
-            'horizontal_well_step': well_np['horizontal_well_step'],
             'typewell_step': typewell_np['typewell_step'],
             'typewell_min_depth': typewell_np['min_depth'],
         }
@@ -383,8 +390,8 @@ def main():
         sample_name = next(iter(dataset))
         sample = dataset[sample_name]
         print(f"\nSample well: {sample_name}")
-        print(f"  MD points: {len(sample['md'])}")
-        print(f"  Trajectory points: {len(sample['traj_md'])}")
+        print(f"  Well trajectory points: {len(sample['well_md'])}")
+        print(f"  WellLog points: {len(sample['log_md'])}")
         print(f"  Typewell points: {len(sample['typewell_tvd'])}")
         print(f"  Reference segments: {len(sample['ref_shifts'])}")
         print(f"  start_md: {sample['start_md']:.2f}")
