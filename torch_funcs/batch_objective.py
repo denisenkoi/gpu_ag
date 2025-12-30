@@ -24,7 +24,10 @@ def batch_objective_function_torch(
     angle_sum_power,
     min_pearson_value,
     tvd_to_typewell_shift=0.0,
-    prev_segment_angle=None
+    prev_segment_angle=None,
+    min_angle_diff=0.2,
+    min_trend_deviation=0.5,
+    trend_power=1.0
 ):
     """
     Batch objective function for DE optimization.
@@ -72,13 +75,17 @@ def batch_objective_function_torch(
 
     # Angle sum penalty: (batch,)
     # Includes angle difference with prev_segment (last frozen) if provided
+    # min_angle_diff prevents degenerate CMA-ES covariance matrix
     K = angles.shape[1]
     if K > 1:
         angle_diffs = torch.abs(angles[:, 1:] - angles[:, :-1])  # (batch, K-1)
+        # Clamp to minimum to prevent CMA-ES covariance degeneration
+        angle_diffs = torch.clamp(angle_diffs, min=min_angle_diff)
         n_diffs_base = angle_diffs.shape[1]  # Original count for normalization
         if prev_segment_angle is not None:
             # Add diff between prev_segment and first optimizing segment
             first_diff = torch.abs(angles[:, 0] - prev_segment_angle)  # (batch,)
+            first_diff = torch.clamp(first_diff, min=min_angle_diff)
             angle_diffs = torch.cat([first_diff.unsqueeze(1), angle_diffs], dim=1)  # (batch, K)
         # Normalize to original scale: sum of original diffs + weighted extra diff
         # This keeps backward compatibility while adding prev_segment influence
@@ -90,9 +97,19 @@ def batch_objective_function_torch(
     elif K == 1 and prev_segment_angle is not None:
         # Single segment but have prev_segment - penalize diff with it
         angle_diffs = torch.abs(angles[:, 0] - prev_segment_angle)
+        angle_diffs = torch.clamp(angle_diffs, min=min_angle_diff)
         angle_sum_penalty = angle_diffs ** angle_sum_power
     else:
         angle_sum_penalty = torch.zeros(batch_size, device=device, dtype=dtype)
+
+    # Trend deviation penalty: penalize mean angle deviation from incoming trend
+    if prev_segment_angle is not None:
+        mean_angle = torch.mean(angles, dim=1)  # (batch,)
+        trend_deviation = torch.abs(mean_angle - prev_segment_angle)
+        trend_deviation = torch.clamp(trend_deviation, min=min_trend_deviation)
+        trend_penalty = trend_deviation ** trend_power
+    else:
+        trend_penalty = torch.zeros(batch_size, device=device, dtype=dtype)
 
     # Calculate projection for all batches
     success_mask, tvt_batch, synt_curve_batch, first_start_idx = calc_horizontal_projection_batch_torch(
@@ -152,12 +169,12 @@ def batch_objective_function_torch(
     # Combine metrics
     pearson_component = 1 - pearson
 
-    # Calculate full metric (angle_sum_penalty remains as soft constraint)
+    # Calculate full metric (angle_sum_penalty and trend_penalty as soft constraints)
     metric_values = (
         (pearson_component ** pearson_power) *
         (mse ** mse_power) *
         (1.0 / intersections_component)
-    ) * (1 + angle_sum_penalty)
+    ) * (1 + angle_sum_penalty) * (1 + trend_penalty)
 
     # Apply angle violation penalty (exponential)
     metric_values = metric_values * (1 + angle_violation_penalty)
@@ -290,7 +307,10 @@ class TorchObjectiveWrapper:
         min_pearson_value,
         tvd_to_typewell_shift=0.0,
         prev_segment_angle=None,
-        device='cuda'
+        device='cuda',
+        min_angle_diff=0.2,
+        min_trend_deviation=0.5,
+        trend_power=1.0
     ):
         """
         Initialize wrapper with static data.
@@ -337,6 +357,11 @@ class TorchObjectiveWrapper:
         self.tvd_to_typewell_shift = tvd_to_typewell_shift
         self.prev_segment_angle = prev_segment_angle
 
+        # New parameters for CMA-ES stability and trend penalty
+        self.min_angle_diff = min_angle_diff
+        self.min_trend_deviation = min_trend_deviation
+        self.trend_power = trend_power
+
     def __call__(self, shifts_batch):
         """
         Evaluate batch of shift configurations.
@@ -370,7 +395,10 @@ class TorchObjectiveWrapper:
             self.angle_sum_power,
             self.min_pearson_value,
             self.tvd_to_typewell_shift,
-            self.prev_segment_angle
+            self.prev_segment_angle,
+            self.min_angle_diff,
+            self.min_trend_deviation,
+            self.trend_power
         )
 
     def evaluate_single(self, shifts):

@@ -238,10 +238,15 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
 
         # Optimization parameters (same as Python executor for compatibility)
         self.pearson_power = float(os.getenv('PYTHON_PEARSON_POWER', '2.0'))
-        self.mse_power = float(os.getenv('PYTHON_MSE_POWER', '0.001'))
+        self.mse_power = float(os.getenv('PYTHON_MSE_POWER', '2'))
         self.num_intervals_self_correlation = int(os.getenv('PYTHON_NUM_INTERVALS_SC', '0'))
         self.sc_power = float(os.getenv('PYTHON_SC_POWER', '1.15'))
         self.min_pearson_value = float(os.getenv('PYTHON_MIN_PEARSON_VALUE', '-1.0'))
+
+        # CMA-ES stability parameters (prevent covariance matrix degeneration)
+        self.min_angle_diff = float(os.getenv('PYTHON_MIN_ANGLE_DIFF', '0.2'))
+        self.min_trend_deviation = float(os.getenv('PYTHON_MIN_TREND_DEVIATION', '0.5'))
+        self.trend_power = float(os.getenv('PYTHON_TREND_POWER', '1.0'))
 
         # GPU-specific parameters
         self.n_restarts = int(os.getenv('GPU_N_RESTARTS', '5'))
@@ -492,7 +497,10 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
             min_pearson_value=self.min_pearson_value,
             tvd_to_typewell_shift=self.tvd_to_typewell_shift,
             prev_segment_angle=prev_segment_angle,
-            device=self.device
+            device=self.device,
+            min_angle_diff=self.min_angle_diff,
+            min_trend_deviation=self.min_trend_deviation,
+            trend_power=self.trend_power
         )
 
         return wrapper, bounds_tensor
@@ -586,22 +594,53 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                         solutions.set_evals(fitness)
 
                 problem = AGProblemBounded()
-                searcher = CMAES(
-                    problem,
-                    stdev_init=stdev_init,
-                    popsize=self.single_popsize
-                )
+                # stdev_min prevents covariance matrix degeneration (0 = disabled for debugging)
+                stdev_min_val = float(os.getenv('GPU_STDEV_MIN', '0'))
+                searcher_kwargs = {
+                    'stdev_init': stdev_init,
+                    'popsize': self.single_popsize
+                }
+                if stdev_min_val > 0:
+                    searcher_kwargs['stdev_min'] = stdev_min_val
+                searcher = CMAES(problem, **searcher_kwargs)
 
-                for _ in range(self.maxiter):
-                    searcher.step()
+                cmaes_converged_early = False
+                try:
+                    for iter_num in range(self.maxiter):
+                        searcher.step()
+                except Exception as e:
+                    # Graceful recovery: save current best and continue
+                    cmaes_converged_early = True
+                    try:
+                        stdev = searcher._sigma if hasattr(searcher, '_sigma') else 'N/A'
+                        pop = searcher.population
+                        if pop is not None and hasattr(pop, 'values') and pop.evals is not None:
+                            best_idx = pop.evals.argmin()
+                            best_overall_fun = pop.evals[best_idx].item()
+                            best_overall_x = pop.values[best_idx].clone()
+                            best_shifts_m = best_overall_x.cpu().numpy() * self.fixed_md_range
+                            logger.warning(f"CMA-ES degenerated at iter {iter_num}/{self.maxiter}: "
+                                          f"stdev={stdev}, fun={best_overall_fun:.6f}, "
+                                          f"shifts_m={[f'{s:.2f}' for s in best_shifts_m]}")
+                            logger.warning(f"Continuing with current best solution (graceful recovery)")
+                        else:
+                            logger.error(f"CMA-ES crashed at iter {iter_num}, no valid population - using center")
+                            best_overall_x = torch.tensor((lb + ub) / 2, dtype=torch.float64, device=self.device)
+                            best_overall_fun = wrapper(best_overall_x.unsqueeze(0)).item()
+                    except Exception as inner_e:
+                        logger.error(f"CMA-ES crashed at iter {iter_num}, recovery failed: {inner_e}")
+                        best_overall_x = torch.tensor((lb + ub) / 2, dtype=torch.float64, device=self.device)
+                        best_overall_fun = wrapper(best_overall_x.unsqueeze(0)).item()
 
-                pop = searcher.population
-                if pop is not None and hasattr(pop, 'evals') and pop.evals is not None:
-                    valid_mask = ~torch.isinf(pop.evals)
-                    if valid_mask.any():
-                        best_idx = pop.evals.argmin()
-                        best_overall_fun = pop.evals[best_idx].item()
-                        best_overall_x = pop.values[best_idx].clone()
+                # Only extract from population if we didn't recover from degeneration
+                if not cmaes_converged_early:
+                    pop = searcher.population
+                    if pop is not None and hasattr(pop, 'evals') and pop.evals is not None:
+                        valid_mask = ~torch.isinf(pop.evals)
+                        if valid_mask.any():
+                            best_idx = pop.evals.argmin()
+                            best_overall_fun = pop.evals[best_idx].item()
+                            best_overall_x = pop.values[best_idx].clone()
 
                 if best_overall_x is None:
                     best_overall_x = torch.tensor((lb + ub) / 2, dtype=torch.float64, device=self.device)
@@ -621,9 +660,11 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                     center_init = torch.tensor(center_shifts, dtype=torch.float64, device=self.device)
 
                     problem = AGProblem()
+                    stdev_min = float(os.getenv('GPU_STDEV_MIN', '0.001'))
                     searcher = CMAES(
                         problem,
                         stdev_init=stdev_init,
+                        stdev_min=stdev_min,
                         popsize=self.popsize,
                         center_init=center_init
                     )
