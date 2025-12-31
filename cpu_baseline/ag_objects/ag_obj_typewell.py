@@ -47,7 +47,23 @@ class TypeWell:
             duplicates = df_type_well[df_type_well['Depth'].duplicated(keep=False)]
             raise ValueError(f"Duplicate TVD values found in typeLog after NaN cleanup: {duplicates['Depth'].unique()}")
 
-        # Вызываем стандартную подготовку данных
+        # Determine source step from data
+        # Use source data directly if uniform and step >= 0.1ft (0.03048m)
+        MIN_STEP = 0.03048  # 0.1ft
+        depths = df_type_well['Depth'].values
+        if len(depths) > 1:
+            source_step = np.median(np.diff(depths))
+            if source_step >= MIN_STEP and check_uniform(depths, source_step):
+                # Source data is uniform with acceptable step - use directly without resample
+                self.typewell_step = source_step
+                self.min_depth = depths.min()
+                self.tvd = depths
+                self.value = df_type_well['Curve'].values
+                self.normalized = False
+                return
+            # else: resample to MIN_STEP or source_step
+
+        # Вызываем стандартную подготовку данных (with resample)
         self.prepare_data(df_type_well)
 
     def prepare_data(self, df_type_well):

@@ -271,11 +271,16 @@ def compute_detailed_metrics_torch(
     angle_range,
     angle_sum_power,
     tvd_to_typewell_shift=0.0,
-    prev_segment_angle=None
+    prev_segment_angle=None,
+    reward_start_segment_idx=0
 ):
     """
     Compute detailed metrics for a single shift configuration.
     Returns dict with all components: pearson, mse, angles, penalties, objective.
+
+    Args:
+        reward_start_segment_idx: segment index from which to calculate Pearson/MSE.
+            0 = all segments (default), 1 = skip first segment (telescope mode).
     """
     device = shifts.device
     dtype = shifts.dtype
@@ -327,19 +332,30 @@ def compute_detailed_metrics_torch(
         well_data, typewell_data, segments_batch, tvd_to_typewell_shift
     )
 
-    # Get value array
+    # Determine reward range (telescope mode: skip first segment(s) for Pearson/MSE)
     last_end_idx = int(segments_torch[-1, 1].item())
+    K = segments_torch.shape[0]
+    if reward_start_segment_idx > 0 and reward_start_segment_idx < K:
+        reward_start_idx = int(segments_torch[reward_start_segment_idx, 0].item())
+    else:
+        reward_start_idx = first_start_idx
+
+    # Get value array for reward range
     N_indices = last_end_idx - first_start_idx + 1
-    value_slice = well_data['value'][first_start_idx:last_end_idx + 1]
+    reward_offset = reward_start_idx - first_start_idx
+    value_slice = well_data['value'][reward_start_idx:last_end_idx + 1]
     value_batch = value_slice.unsqueeze(0)
 
-    # MSE and Pearson
-    mse = mse_batch_torch(value_batch, synt_curve_batch)
-    pearson = pearson_batch_torch(value_batch, synt_curve_batch)
+    # MSE and Pearson (only on reward range, not including lever)
+    synt_reward = synt_curve_batch[:, reward_offset:reward_offset + value_slice.shape[0]]
+    mse = mse_batch_torch(value_batch, synt_reward)
+    pearson = pearson_batch_torch(value_batch, synt_reward)
 
-    # Clamp pearson to min_pearson_value (passed via angle_range parameter position)
+    # Store raw pearson for logging (without clamp)
+    pearson_raw = pearson.clone()
+
+    # Clamp pearson to min_pearson_value for objective calculation
     # Note: compute_detailed doesn't have min_pearson_value param, so we use 0.3 as default
-    # TODO: Add min_pearson_value to function signature
     pearson = torch.clamp(pearson, min=0.3)
 
     # Compute objective (angle violation -> inf)
@@ -353,6 +369,7 @@ def compute_detailed_metrics_torch(
     return {
         'objective': objective[0].item(),
         'pearson': pearson[0].item(),
+        'pearson_raw': pearson_raw[0].item(),  # Without clamp, for logging
         'mse': mse[0].item(),
         'pearson_component': pearson_component[0].item(),
         'angle_penalty': angle_penalty[0].item(),
@@ -530,5 +547,6 @@ class TorchObjectiveWrapper:
             self.angle_range,
             self.angle_sum_power,
             self.tvd_to_typewell_shift,
-            self.prev_segment_angle
+            self.prev_segment_angle,
+            self.reward_start_segment_idx
         )

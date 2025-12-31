@@ -199,6 +199,109 @@ def get_reference_shifts_for_segments(ref_segments, segment_end_mds_m, md_range,
     return ref_shifts_m, ref_shifts_norm, first_start_shift_norm
 
 
+def build_reference_segments_torch(ref_segments_json, well, md_start_m, md_end_m, md_range, min_md, device='cpu'):
+    """
+    Build reference segments with correct geometry for MD range.
+
+    Args:
+        ref_segments_json: List of reference segment dicts
+        well: Normalized Well object
+        md_start_m: Start MD in meters
+        md_end_m: End MD in meters
+        md_range: MD range for normalization
+        min_md: Min MD for normalization
+        device: torch device
+
+    Returns:
+        segments_torch: (K, 6) tensor with reference segments
+    """
+    segments = []
+
+    for i, seg in enumerate(ref_segments_json):
+        seg_start_md = seg.get('startMd', 0)
+        seg_start_shift = seg.get('startShift', 0)
+        seg_end_shift = seg.get('endShift', 0)
+
+        if 'endMd' in seg:
+            seg_end_md = seg['endMd']
+        elif i + 1 < len(ref_segments_json):
+            seg_end_md = ref_segments_json[i + 1].get('startMd', seg_start_md)
+        else:
+            continue
+
+        # Skip if entirely outside range
+        if seg_end_md < md_start_m or seg_start_md > md_end_m:
+            continue
+
+        # Clip to range
+        clipped_start_md = max(seg_start_md, md_start_m)
+        clipped_end_md = min(seg_end_md, md_end_m)
+
+        if clipped_end_md - clipped_start_md < 0.1:
+            continue
+
+        # Interpolate shifts for clipped boundaries
+        seg_len = seg_end_md - seg_start_md
+        if seg_len > 0:
+            if clipped_start_md > seg_start_md:
+                frac = (clipped_start_md - seg_start_md) / seg_len
+                clipped_start_shift = seg_start_shift + (seg_end_shift - seg_start_shift) * frac
+            else:
+                clipped_start_shift = seg_start_shift
+
+            if clipped_end_md < seg_end_md:
+                frac = (clipped_end_md - seg_start_md) / seg_len
+                clipped_end_shift = seg_start_shift + (seg_end_shift - seg_start_shift) * frac
+            else:
+                clipped_end_shift = seg_end_shift
+        else:
+            clipped_start_shift = seg_start_shift
+            clipped_end_shift = seg_end_shift
+
+        # Find indices in well
+        # well.measured_depth may be normalized (0-1) or absolute depending on well.normalized
+        if well.normalized:
+            # Convert absolute MD to normalized for search
+            search_start = (clipped_start_md - min_md) / md_range
+            search_end = (clipped_end_md - min_md) / md_range
+        else:
+            search_start = clipped_start_md
+            search_end = clipped_end_md
+
+        start_idx = int(np.searchsorted(well.measured_depth, search_start))
+        end_idx = int(np.searchsorted(well.measured_depth, search_end))
+
+        start_idx = min(start_idx, len(well.measured_depth) - 1)
+        end_idx = min(end_idx, len(well.measured_depth) - 1)
+
+        if start_idx >= end_idx:
+            continue
+
+        # Get VS from well at indices
+        start_vs = well.vs_thl[start_idx]
+        end_vs = well.vs_thl[end_idx]
+
+        # Normalize VS and shifts if well is not already normalized
+        if well.normalized:
+            # VS already normalized
+            start_vs_norm = start_vs
+            end_vs_norm = end_vs
+        else:
+            start_vs_norm = (start_vs - well.min_vs) / md_range
+            end_vs_norm = (end_vs - well.min_vs) / md_range
+
+        # Shifts always come from reference (absolute meters), need normalization
+        start_shift_norm = clipped_start_shift / md_range
+        end_shift_norm = clipped_end_shift / md_range
+
+        segments.append([start_idx, end_idx, start_vs_norm, end_vs_norm, start_shift_norm, end_shift_norm])
+
+    if not segments:
+        return None
+
+    return torch.tensor(segments, dtype=torch.float64, device=device)
+
+
 class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
     """GPU-accelerated AutoGeosteering executor using EvoTorch SNES
 
@@ -1357,40 +1460,58 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
 
         # Get segment start and end MDs in meters
         first_start_md_m = segments[0].start_md * self.fixed_md_range + self.fixed_min_md
-        segment_end_mds_m = []
-        for seg in segments:
-            end_md_m = seg.end_md * self.fixed_md_range + self.fixed_min_md
-            segment_end_mds_m.append(end_md_m)
-
-        # Get reference shifts interpolated to our segments
-        ref_shifts_m, ref_shifts_norm, first_start_shift_norm = get_reference_shifts_for_segments(
-            self.reference_segments, segment_end_mds_m, self.fixed_md_range, first_start_md_m
-        )
-
-        # DEBUG: Log segments TVD info for angle calculation
-        seg_torch = wrapper.segments_torch
-        logger.info(f"  DEBUG segments_torch shape: {seg_torch.shape}")
-        for i in range(min(4, seg_torch.shape[0])):
-            start_tvd = seg_torch[i, 2].item() * self.fixed_md_range
-            end_tvd = seg_torch[i, 3].item() * self.fixed_md_range
-            start_shift = seg_torch[i, 4].item() * self.fixed_md_range
-            end_shift = seg_torch[i, 5].item() * self.fixed_md_range
-            delta_tvd = end_tvd - start_tvd
-            delta_shift = end_shift - start_shift
-            logger.info(f"  Seg[{i}]: TVD={start_tvd:.2f}-{end_tvd:.2f}m (Δ={delta_tvd:.2f}m), Shift={start_shift:.2f}-{end_shift:.2f}m (Δ={delta_shift:.2f}m)")
+        last_end_md_m = segments[-1].end_md * self.fixed_md_range + self.fixed_min_md
 
         # Compute detailed metrics for optimized
         opt_metrics = wrapper.compute_detailed(optimal_shifts)
 
-        # Compute detailed metrics for reference (with corrected first_start_shift)
-        ref_metrics = wrapper.compute_detailed(ref_shifts_norm, first_start_shift=first_start_shift_norm)
+        # Build reference segments with correct geometry for the same MD range
+        ref_segments_torch = build_reference_segments_torch(
+            self.reference_segments,
+            self.ag_well,
+            first_start_md_m,
+            last_end_md_m,
+            self.fixed_md_range,
+            self.fixed_min_md,
+            device=self.device
+        )
+
+        if ref_segments_torch is None or len(ref_segments_torch) == 0:
+            logger.warning("No reference segments in optimization range")
+            ref_metrics = {'objective': float('nan'), 'pearson': float('nan'), 'mse': float('nan'),
+                          'angle_penalty': 0.0, 'angle_sum_penalty': 0.0, 'angles_deg': []}
+        else:
+            # Create wrapper with reference segments geometry
+            # Reference shifts are already in the segments (columns 4,5)
+            ref_shifts = ref_segments_torch[:, 5].tolist()  # end_shifts
+
+            from torch_funcs.batch_objective import compute_detailed_metrics_torch
+
+            # Compute reference metrics using reference geometry
+            # Use same reward_start_segment_idx as optimization (single source of truth)
+            ref_shifts_tensor = torch.tensor(ref_shifts, dtype=torch.float64, device=self.device)
+            ref_metrics = compute_detailed_metrics_torch(
+                ref_shifts_tensor,
+                wrapper.well_data,
+                wrapper.typewell_data,
+                ref_segments_torch,
+                wrapper.pearson_power,
+                wrapper.mse_power,
+                wrapper.angle_range,
+                wrapper.angle_sum_power,
+                self.tvd_to_typewell_shift,
+                prev_segment_angle=None,
+                reward_start_segment_idx=wrapper.reward_start_segment_idx
+            )
 
         # Log comparison
         logger.info(f"=== Metrics Comparison [{step_type}] ===")
+        logger.info(f"  Opt segments: {len(segments)}, Ref segments: {len(ref_segments_torch) if ref_segments_torch is not None else 0}")
         logger.info(f"  {'':12} | {'Optimized':>12} | {'Reference':>12} | {'Diff':>10}")
         logger.info(f"  {'-'*12}-+-{'-'*12}-+-{'-'*12}-+-{'-'*10}")
         logger.info(f"  {'Objective':12} | {opt_metrics['objective']:>12.6f} | {ref_metrics['objective']:>12.6f} | {opt_metrics['objective'] - ref_metrics['objective']:>+10.6f}")
         logger.info(f"  {'Pearson':12} | {opt_metrics['pearson']:>12.6f} | {ref_metrics['pearson']:>12.6f} | {opt_metrics['pearson'] - ref_metrics['pearson']:>+10.6f}")
+        logger.info(f"  {'Pearson(raw)':12} | {opt_metrics.get('pearson_raw', opt_metrics['pearson']):>12.6f} | {ref_metrics.get('pearson_raw', ref_metrics['pearson']):>12.6f} |")
         logger.info(f"  {'MSE':12} | {opt_metrics['mse']:>12.6f} | {ref_metrics['mse']:>12.6f} | {opt_metrics['mse'] - ref_metrics['mse']:>+10.6f}")
         logger.info(f"  {'AnglePenalty':12} | {opt_metrics['angle_penalty']:>12.6f} | {ref_metrics['angle_penalty']:>12.6f} | {opt_metrics['angle_penalty'] - ref_metrics['angle_penalty']:>+10.6f}")
         logger.info(f"  {'AngleSumPen':12} | {opt_metrics['angle_sum_penalty']:>12.6f} | {ref_metrics['angle_sum_penalty']:>12.6f} | {opt_metrics['angle_sum_penalty'] - ref_metrics['angle_sum_penalty']:>+10.6f}")
@@ -1398,7 +1519,7 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         # Log angles
         opt_angles = opt_metrics['angles_deg']
         ref_angles = ref_metrics['angles_deg']
-        logger.info(f"  Angles (°):  Opt={[f'{a:.2f}' for a in opt_angles]}  Ref={[f'{a:.2f}' for a in ref_angles]}")
+        logger.info(f"  Angles (°):  Opt={[f'{a:.2f}' for a in opt_angles[:4]]}...  Ref={[f'{a:.2f}' for a in ref_angles[:4]]}...")
 
         # Status
         if opt_metrics['objective'] <= ref_metrics['objective']:
