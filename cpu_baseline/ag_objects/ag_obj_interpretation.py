@@ -172,6 +172,97 @@ def segments_to_json(segments):
     return [segment.to_json() for segment in segments]
 
 
+def create_telescope_segments(well,
+                              lever_length_idx,
+                              work_segment_length_idx,
+                              work_segments_count,
+                              start_idx,
+                              start_shift,
+                              extrapolate_angle=None):
+    """
+    Create telescope segments: one long lever + multiple short work segments.
+
+    Telescope mode: lever adjusts height, work segments are optimized for correlation.
+    Reward is calculated only from work segments (lever excluded via reward_start_segment_idx=1).
+
+    Args:
+        well: Well object
+        lever_length_idx: Length of lever segment in indices
+        work_segment_length_idx: Length of each work segment in indices
+        work_segments_count: Number of work segments after lever
+        start_idx: Starting index for lever
+        start_shift: Starting shift value
+        extrapolate_angle: Angle in degrees to initialize segments (optional).
+                          If provided, end_shift = start_shift + tan(angle) * vs_length
+
+    Returns:
+        List of segments: [lever, work1, work2, ...]
+        If not enough space for lever + at least 1 work segment, returns None (fallback to normal mode)
+    """
+    max_idx = len(well.measured_depth) - 1
+    available_length = max_idx - start_idx
+
+    # Need at least lever + 1 work segment
+    min_required = lever_length_idx + work_segment_length_idx
+    if available_length < min_required:
+        logger.warning(f"Telescope: not enough space ({available_length} idx < {min_required} required), fallback to normal")
+        return None
+
+    segments = []
+    current_idx = start_idx
+    current_shift = start_shift
+
+    # Create lever segment (long first segment)
+    lever_end_idx = min(current_idx + lever_length_idx, max_idx)
+    if lever_end_idx > current_idx:
+        # Calculate end_shift based on extrapolate_angle if provided
+        if extrapolate_angle is not None:
+            vs_length = well.vs_thl[lever_end_idx] - well.vs_thl[current_idx]
+            lever_end_shift = current_shift + math.tan(math.radians(extrapolate_angle)) * vs_length
+        else:
+            lever_end_shift = current_shift
+
+        lever = Segment(well, start_idx=current_idx, start_shift=current_shift,
+                       end_idx=lever_end_idx, end_shift=lever_end_shift)
+        segments.append(lever)
+        current_idx = lever_end_idx
+        current_shift = lever_end_shift
+
+    # Create work segments (short segments after lever)
+    work_created = 0
+    for i in range(work_segments_count):
+        work_end_idx = min(current_idx + work_segment_length_idx, max_idx)
+        if work_end_idx <= current_idx:
+            break
+
+        # Calculate end_shift based on extrapolate_angle if provided
+        if extrapolate_angle is not None:
+            vs_length = well.vs_thl[work_end_idx] - well.vs_thl[current_idx]
+            work_end_shift = current_shift + math.tan(math.radians(extrapolate_angle)) * vs_length
+        else:
+            work_end_shift = current_shift
+
+        work_segment = Segment(well, start_idx=current_idx, start_shift=current_shift,
+                              end_idx=work_end_idx, end_shift=work_end_shift)
+        segments.append(work_segment)
+        current_idx = work_end_idx
+        current_shift = work_end_shift
+        work_created += 1
+
+        if current_idx >= max_idx:
+            break
+
+    # Must have at least 1 work segment for telescope to make sense
+    if work_created == 0:
+        logger.warning(f"Telescope: no work segments created, fallback to normal")
+        return None
+
+    if extrapolate_angle is not None:
+        logger.info(f"Telescope: initialized with extrapolate_angle={extrapolate_angle:.2f}°")
+
+    return segments
+
+
 def create_segments(well,
                     segments_count,
                     segment_len,

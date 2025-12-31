@@ -10,6 +10,45 @@ from .correlations import pearson_batch_torch, mse_batch_torch
 from .self_correlation import find_intersections_batch_torch
 
 
+def normalized_angles_to_shifts_torch(
+    normalized_angles: torch.Tensor,
+    segments_torch: torch.Tensor,
+    normalize_factor: float = 10.0
+) -> torch.Tensor:
+    """
+    Конвертирует нормализованные углы в end_shift'ы (кумулятивно) - GPU batch версия
+
+    Args:
+        normalized_angles: (batch, K) нормализованные углы (0.1 = 1°)
+        segments_torch: (K, 6) = [start_idx, end_idx, start_tvd, end_tvd, start_shift, end_shift]
+        normalize_factor: множитель (10.0 = 0.1 -> 1°)
+
+    Returns:
+        shifts: (batch, K) end_shift для каждого сегмента
+    """
+    batch_size, K = normalized_angles.shape
+    device = normalized_angles.device
+    dtype = normalized_angles.dtype
+
+    # segments_torch: start_tvd(2) и end_tvd(3) - это VS (vertical section)
+    start_vs = segments_torch[:, 2]  # (K,)
+    end_vs = segments_torch[:, 3]    # (K,)
+    segment_lens = end_vs - start_vs  # (K,)
+
+    # start_shift первого сегмента - начальная точка
+    first_start_shift = segments_torch[0, 4]
+
+    angles_deg = normalized_angles * normalize_factor  # (batch, K)
+    angles_rad = torch.deg2rad(angles_deg)
+    delta_shifts = segment_lens.unsqueeze(0) * torch.tan(angles_rad)  # (batch, K)
+
+    # Кумулятивная сумма дельт
+    cumsum = torch.cumsum(delta_shifts, dim=1)  # (batch, K)
+    shifts = first_start_shift + cumsum
+
+    return shifts
+
+
 def batch_objective_function_torch(
     shifts_batch,
     well_data,
@@ -27,7 +66,8 @@ def batch_objective_function_torch(
     prev_segment_angle=None,
     min_angle_diff=0.2,
     min_trend_deviation=0.5,
-    trend_power=1.0
+    trend_power=1.0,
+    reward_start_segment_idx=0
 ):
     """
     Batch objective function for DE optimization.
@@ -46,6 +86,9 @@ def batch_objective_function_torch(
         angle_sum_power: power for angle sum penalty
         min_pearson_value: minimum pearson threshold
         tvd_to_typewell_shift: vertical shift
+        reward_start_segment_idx: segment index from which to calculate Pearson/MSE reward.
+            0 = all segments (default), 1 = skip first segment (telescope mode), etc.
+            Projection is still calculated for ALL segments (geometry needed).
 
     Returns:
         metrics: tensor (batch,) of metric values (lower is better)
@@ -111,29 +154,59 @@ def batch_objective_function_torch(
     else:
         trend_penalty = torch.zeros(batch_size, device=device, dtype=dtype)
 
-    # Calculate projection for all batches
+    # Calculate projection for all batches (always for ALL segments - geometry needed)
     success_mask, tvt_batch, synt_curve_batch, first_start_idx = calc_horizontal_projection_batch_torch(
         well_data, typewell_data, segments_batch, tvd_to_typewell_shift
     )
 
-    # Get value array for the segment range
+    # Determine reward range (telescope mode: skip first segment(s) for Pearson/MSE)
     last_end_idx = int(segments_torch[-1, 1].item())
-    N_indices = last_end_idx - first_start_idx + 1
-    value_slice = well_data['value'][first_start_idx:last_end_idx + 1]
-    value_batch = value_slice.unsqueeze(0).expand(batch_size, -1)  # (batch, N_indices)
+    K = segments_torch.shape[0]
+    if reward_start_segment_idx > 0 and reward_start_segment_idx < K:
+        reward_start_idx = int(segments_torch[reward_start_segment_idx, 0].item())
+    else:
+        reward_start_idx = first_start_idx
 
-    # Check for NaN in synthetic curve
+    # Calculate offset for slicing synthetic curve
+    reward_offset = reward_start_idx - first_start_idx
+
+    # Get value array for REWARD range (may skip telescope lever segment)
+    value_slice = well_data['value'][reward_start_idx:last_end_idx + 1]
+    value_batch = value_slice.unsqueeze(0).expand(batch_size, -1)  # (batch, N_reward)
+
+    # Slice synthetic curve to match reward range
+    synt_curve_reward = synt_curve_batch[:, reward_offset:]  # (batch, N_reward)
+
+    # Check for NaN in synthetic curve (check full curve for projection validity)
     has_nan = torch.any(torch.isnan(synt_curve_batch), dim=1)
     success_mask = success_mask & ~has_nan
 
-    # Calculate MSE for successful batches: (batch,)
-    mse = mse_batch_torch(value_batch, synt_curve_batch)
+    # Calculate MSE for reward range (may exclude telescope lever)
+    mse = mse_batch_torch(value_batch, synt_curve_reward)
 
-    # Calculate Pearson for successful batches: (batch,)
-    pearson = pearson_batch_torch(value_batch, synt_curve_batch)
+    # Calculate Pearson for reward range (may exclude telescope lever)
+    pearson_raw = pearson_batch_torch(value_batch, synt_curve_reward)
 
-    # Clamp pearson to min value
-    pearson = torch.clamp(pearson, min=min_pearson_value)
+    # Debug output for reward range diagnostics
+    import os
+    if os.getenv('DEBUG_REWARD_RANGE', 'false').lower() == 'true':
+        import logging
+        logger = logging.getLogger('batch_objective')
+        md = well_data.get('md')
+        md_range = well_data.get('md_range', 1.0)
+        min_md = well_data.get('min_md', 0.0) if 'min_md' in well_data else 0.0
+        if md is not None:
+            # Denormalize MD for display
+            md_start_real = md[reward_start_idx].item() * md_range + min_md if well_data.get('normalized') else md[reward_start_idx].item()
+            md_end_real = md[last_end_idx].item() * md_range + min_md if well_data.get('normalized') else md[last_end_idx].item()
+            logger.info(f"DEBUG REWARD: idx={reward_start_idx}-{last_end_idx}, MD={md_start_real:.1f}-{md_end_real:.1f}m (normalized={well_data.get('normalized')})")
+        logger.info(f"DEBUG REWARD: value_batch shape={value_batch.shape}, synt_curve shape={synt_curve_reward.shape}")
+        logger.info(f"DEBUG REWARD: value[0] first5={value_batch[0,:5].tolist()}, last5={value_batch[0,-5:].tolist()}")
+        logger.info(f"DEBUG REWARD: synt[0] first5={synt_curve_reward[0,:5].tolist()}, last5={synt_curve_reward[0,-5:].tolist()}")
+        logger.info(f"DEBUG REWARD: pearson_raw[0]={pearson_raw[0].item():.4f}")
+
+    # Clamp pearson to min value (no penalty, just floor)
+    pearson = torch.clamp(pearson_raw, min=min_pearson_value)
 
     # Self-correlation: DISABLED for GPU optimization (sequential bottleneck)
     # TODO: Implement vectorized version (see docs/self_correlation_approaches.md)
@@ -178,6 +251,9 @@ def batch_objective_function_torch(
 
     # Apply angle violation penalty (exponential)
     metric_values = metric_values * (1 + angle_violation_penalty)
+
+    # Note: pearson_below_threshold penalty removed (was x100)
+    # Now only clamp to min_pearson_value without additional penalty
 
     # Apply success mask - only projection failure causes inf
     metrics = torch.where(success_mask, metric_values, metrics)
@@ -310,7 +386,8 @@ class TorchObjectiveWrapper:
         device='cuda',
         min_angle_diff=0.2,
         min_trend_deviation=0.5,
-        trend_power=1.0
+        trend_power=1.0,
+        reward_start_segment_idx=0
     ):
         """
         Initialize wrapper with static data.
@@ -362,6 +439,9 @@ class TorchObjectiveWrapper:
         self.min_trend_deviation = min_trend_deviation
         self.trend_power = trend_power
 
+        # Telescope mode: skip first segment(s) in Pearson/MSE reward
+        self.reward_start_segment_idx = reward_start_segment_idx
+
     def __call__(self, shifts_batch):
         """
         Evaluate batch of shift configurations.
@@ -398,7 +478,8 @@ class TorchObjectiveWrapper:
             self.prev_segment_angle,
             self.min_angle_diff,
             self.min_trend_deviation,
-            self.trend_power
+            self.trend_power,
+            self.reward_start_segment_idx
         )
 
     def evaluate_single(self, shifts):

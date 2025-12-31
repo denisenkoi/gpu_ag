@@ -45,13 +45,14 @@ from dotenv import load_dotenv
 class StarSteerImporter:
     """Import interpretations into StarSteer source wells."""
 
-    def __init__(self, results_dir: Path, env_file: Path = None):
+    def __init__(self, results_dir: Path, env_file: Path = None, interp_name: str = None):
         """
         Initialize importer.
 
         Args:
             results_dir: Directory with saved interpretations (work/)
             env_file: Path to .env file (default: gpu_ag/.env)
+            interp_name: Name for imported interpretation (default: AI_GPU_local)
         """
         self.results_dir = Path(results_dir)
 
@@ -84,7 +85,7 @@ class StarSteerImporter:
         self.interp_file = self.starsteer_dir / "interpretation.json"
 
         # Interpretation name for imported results
-        self.import_interp_name = "AI_GPU_local"
+        self.import_interp_name = interp_name or os.getenv("STARSTEER_IMPORT_NAME", "AI_GPU_local")
 
     def list_available_wells(self) -> List[str]:
         """List wells with saved interpretations."""
@@ -619,13 +620,15 @@ def main():
                         help='List available wells')
     parser.add_argument('--env', type=str, default=None,
                         help='Path to .env file')
+    parser.add_argument('--name', type=str, default=None,
+                        help='Interpretation name in StarSteer (default: AI_GPU_local)')
 
     args = parser.parse_args()
 
     results_dir = Path(args.results_dir)
     env_file = Path(args.env) if args.env else None
 
-    importer = StarSteerImporter(results_dir, env_file)
+    importer = StarSteerImporter(results_dir, env_file, interp_name=args.name)
 
     if args.list:
         wells = importer.list_available_wells()

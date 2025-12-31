@@ -32,13 +32,13 @@ from optimizers.optimization_logger import OptimizationLogger
 # AG module imports
 from ag_objects.ag_obj_well import Well
 from ag_objects.ag_obj_typewell import TypeWell
-from ag_objects.ag_obj_interpretation import create_segments, Segment
-from ag_numerical.ag_optimizer_utils import calculate_optimization_bounds
+from ag_objects.ag_obj_interpretation import create_segments, create_telescope_segments, Segment
+from ag_numerical.ag_optimizer_utils import calculate_optimization_bounds, calculate_angle_bounds, angles_to_shifts
 
 # Torch imports
 from numpy_funcs.converters import well_to_numpy, typewell_to_numpy, segments_to_numpy
 from torch_funcs.converters import numpy_to_torch, segments_numpy_to_torch
-from torch_funcs.batch_objective import TorchObjectiveWrapper
+from torch_funcs.batch_objective import TorchObjectiveWrapper, normalized_angles_to_shifts_torch
 
 # EvoTorch
 from evotorch import Problem
@@ -279,6 +279,28 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         # PseudoTypeLog support
         self.use_pseudo_typelog = os.getenv('USE_PSEUDOTYPELOG', 'false').lower() == 'true'
 
+        # Telescope mode: skip first segment(s) in Pearson/MSE reward
+        # TELESCOPE_REWARD_START_SEGMENT=1 means reward calculated from segment 1 (skipping segment 0)
+        self.telescope_reward_start_segment = int(os.getenv('TELESCOPE_REWARD_START_SEGMENT', '0'))
+
+        # Telescope segment creation: one long lever + multiple short work segments
+        # TELESCOPE_MODE=true enables telescope segment creation
+        self.telescope_mode = os.getenv('TELESCOPE_MODE', 'false').lower() == 'true'
+        # TELESCOPE_LEVER_MD = absolute MD where lever ends (e.g. 5944 for ~19500ft)
+        telescope_lever_md_str = os.getenv('TELESCOPE_LEVER_MD')
+        self.telescope_lever_md = float(telescope_lever_md_str) if telescope_lever_md_str else None
+        self.telescope_work_segment_length = float(os.getenv('TELESCOPE_WORK_SEGMENT_LENGTH', '30.0'))  # meters
+        self.telescope_work_segments_count = int(os.getenv('TELESCOPE_WORK_SEGMENTS_COUNT', '4'))
+
+        # Angle optimization mode: optimize angles instead of shifts
+        # When enabled, CMA-ES optimizes normalized angles (0.1 = 1°), then converts to shifts
+        self.angle_optimization_mode = os.getenv('ANGLE_OPTIMIZATION_MODE', 'false').lower() == 'true'
+        self.angle_normalize_factor = float(os.getenv('ANGLE_NORMALIZE_FACTOR', '10.0'))
+
+        # Telescope cheat mode: initialize lever angle from reference trajectory
+        # CHEATING - uses reference data for initialization
+        self.telescope_init_from_reference = os.getenv('TELESCOPE_INIT_FROM_REFERENCE', 'false').lower() == 'true'
+
         # State management
         self.interpretation = None
         self.ag_well = None
@@ -296,10 +318,13 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         self.interpretation_dir = work_dir
         Path(self.interpretation_dir).mkdir(parents=True, exist_ok=True)
 
+        telescope_info = ""
+        if self.telescope_mode:
+            telescope_info = f", TELESCOPE: lever_md={self.telescope_lever_md}, work={self.telescope_work_segment_length}m x {self.telescope_work_segments_count}"
         logger.info(f"GPU executor initialized: device={self.device}, algorithm={self.algorithm}, "
                     f"cmaes_mode={self.cmaes_mode}, single_popsize={self.single_popsize}, "
                     f"restarts={self.n_restarts}, popsize={self.popsize}, maxiter={self.maxiter}, "
-                    f"use_pseudo={self.use_pseudo_typelog}")
+                    f"use_pseudo={self.use_pseudo_typelog}, telescope_reward_start={self.telescope_reward_start_segment}{telescope_info}")
 
     def set_algorithm(self, algorithm: str):
         """Override algorithm from CLI parameter"""
@@ -417,19 +442,76 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         if new_length_m < self.min_optimization_length:
             return 0
 
-        dynamic_segments = math.ceil(new_length_m / self.max_segment_length)
-        actual_count = min(dynamic_segments, self.segments_count)
-        actual_count = max(actual_count, 1)
+        use_telescope = False
+        new_segments = None
 
-        segment_length_idx = new_length_idx // actual_count
+        if self.telescope_mode and self.telescope_lever_md is not None:
+            # Telescope mode: one long lever + multiple short work segments
+            # Calculate lever_length from absolute MD
+            # Note: well.measured_depth is normalized, convert back to absolute
+            start_md_norm = well.measured_depth[start_idx]
+            start_md_abs = start_md_norm * self.fixed_md_range + self.fixed_min_md
+            lever_length_m = self.telescope_lever_md - start_md_abs
+            if lever_length_m <= 0:
+                logger.warning(f"Telescope: lever_md={self.telescope_lever_md} <= start_md={start_md_abs:.1f}, skipping telescope")
+            else:
+                lever_length_idx = int(lever_length_m / well.horizontal_well_step)
+                work_segment_length_idx = int(self.telescope_work_segment_length / well.horizontal_well_step)
 
-        new_segments = create_segments(
-            well=well,
-            segments_count=actual_count,
-            segment_len=segment_length_idx,
-            start_idx=start_idx,
-            start_shift=start_shift
-        )
+                # Get extrapolate_angle
+                extrapolate_angle = None
+                if self.telescope_init_from_reference:
+                    # CHEAT MODE: calculate angle from well trajectory (TVD/VS)
+                    lever_end_idx = min(start_idx + lever_length_idx, len(well.true_vertical_depth) - 1)
+                    tvd_start = well.true_vertical_depth[start_idx]
+                    tvd_end = well.true_vertical_depth[lever_end_idx]
+                    vs_start = well.vs_thl[start_idx]
+                    vs_end = well.vs_thl[lever_end_idx]
+                    delta_tvd = tvd_end - tvd_start
+                    delta_vs = vs_end - vs_start
+                    if abs(delta_vs) > 0.001:
+                        extrapolate_angle = np.degrees(np.arctan(delta_tvd / delta_vs))
+                        logger.info(f"Telescope CHEAT: angle from well trajectory = {extrapolate_angle:.2f}° "
+                                   f"(dTVD={delta_tvd:.2f}, dVS={delta_vs:.2f})")
+                elif self.interpretation and len(self.interpretation) > 0:
+                    # Normal: extrapolate from last segment
+                    last_segment = self.interpretation[-1]
+                    extrapolate_angle = last_segment.angle
+                    logger.info(f"Telescope: extrapolating from last segment angle={extrapolate_angle:.2f}°")
+
+                new_segments = create_telescope_segments(
+                    well=well,
+                    lever_length_idx=lever_length_idx,
+                    work_segment_length_idx=work_segment_length_idx,
+                    work_segments_count=self.telescope_work_segments_count,
+                    start_idx=start_idx,
+                    start_shift=start_shift,
+                    extrapolate_angle=extrapolate_angle
+                )
+                if new_segments is not None:
+                    use_telescope = True
+                    logger.info(f"Telescope mode: lever={lever_length_m:.1f}m + "
+                               f"{len(new_segments)-1} work segments @ {self.telescope_work_segment_length}m each")
+
+        # Track current mode for reward calculation
+        self._current_use_telescope = use_telescope
+        self._current_extrapolate_angle = extrapolate_angle if use_telescope else None
+
+        if not use_telescope:
+            # Normal mode: uniform segments
+            dynamic_segments = math.ceil(new_length_m / self.max_segment_length)
+            actual_count = min(dynamic_segments, self.segments_count)
+            actual_count = max(actual_count, 1)
+
+            segment_length_idx = new_length_idx // actual_count
+
+            new_segments = create_segments(
+                well=well,
+                segments_count=actual_count,
+                segment_len=segment_length_idx,
+                start_idx=start_idx,
+                start_shift=start_shift
+            )
 
         if self.interpretation is None:
             self.interpretation = []
@@ -452,7 +534,18 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
             self_corr_start_idx: Starting index for self-correlation
             prev_segment_angle: Angle of last frozen segment (degrees), used for angle_sum_penalty
         """
-        bounds = calculate_optimization_bounds(segments, angle_range=self.angle_range, accumulative=True)
+        if self.angle_optimization_mode:
+            # Angle mode: bounds for normalized angles
+            # Use extrapolate_angle as center if available (cheat mode)
+            center_angles = getattr(self, '_current_extrapolate_angle', None)
+            bounds = calculate_angle_bounds(segments, self.angle_range, self.angle_normalize_factor, center_angles)
+            if center_angles is not None:
+                logger.info(f"  ANGLE OPTIMIZATION MODE: bounds centered at {center_angles:.2f}° (cheat)")
+            else:
+                logger.info(f"  ANGLE OPTIMIZATION MODE: bounds for normalized angles (factor={self.angle_normalize_factor})")
+        else:
+            # Shift mode: bounds for end_shifts
+            bounds = calculate_optimization_bounds(segments, angle_range=self.angle_range, accumulative=True)
         bounds_tensor = torch.tensor(bounds, dtype=torch.float64, device=self.device)
 
         # Calculate horizontal projection
@@ -483,6 +576,9 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         typewell_torch = numpy_to_torch(typewell_np, device=self.device)
         segments_torch = segments_numpy_to_torch(segments_np, device=self.device)
 
+        # Determine reward_start_segment_idx: 1 for telescope mode, 0 for normal
+        current_reward_start = self.telescope_reward_start_segment if getattr(self, '_current_use_telescope', False) else 0
+
         wrapper = TorchObjectiveWrapper(
             well_data=well_torch,
             typewell_data=typewell_torch,
@@ -500,7 +596,8 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
             device=self.device,
             min_angle_diff=self.min_angle_diff,
             min_trend_deviation=self.min_trend_deviation,
-            trend_power=self.trend_power
+            trend_power=self.trend_power,
+            reward_start_segment_idx=current_reward_start
         )
 
         return wrapper, bounds_tensor
@@ -522,10 +619,21 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         lb = bounds[:, 0].cpu().numpy()
         ub = bounds[:, 1].cpu().numpy()
         # DEBUG: Log bounds
-        lb_m = lb * self.fixed_md_range
-        ub_m = ub * self.fixed_md_range
-        logger.info(f"  DEBUG bounds (meters): lb={[f'{x:.2f}' for x in lb_m]}, ub={[f'{x:.2f}' for x in ub_m]}")
+        if self.angle_optimization_mode:
+            # Bounds are normalized angles
+            lb_deg = lb * self.angle_normalize_factor
+            ub_deg = ub * self.angle_normalize_factor
+            logger.info(f"  DEBUG bounds (degrees): lb={[f'{x:.2f}' for x in lb_deg]}, ub={[f'{x:.2f}' for x in ub_deg]}")
+        else:
+            lb_m = lb * self.fixed_md_range
+            ub_m = ub * self.fixed_md_range
+            logger.info(f"  DEBUG bounds (meters): lb={[f'{x:.2f}' for x in lb_m]}, ub={[f'{x:.2f}' for x in ub_m]}")
         stdev_init = (ub - lb).mean() / 2.0  # was /4.0 - wider initial distribution
+
+        # Capture for nested class
+        angle_mode = self.angle_optimization_mode
+        normalize_factor = self.angle_normalize_factor
+        segments_torch = wrapper.segments_torch
 
         # Define EvoTorch Problem
         class AGProblem(Problem):
@@ -540,7 +648,12 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
 
             def _evaluate_batch(inner_self, solutions):
                 x = solutions.values
-                fitness = wrapper(x)
+                if angle_mode:
+                    # Convert normalized angles to shifts
+                    shifts = normalized_angles_to_shifts_torch(x, segments_torch, normalize_factor)
+                    fitness = wrapper(shifts)
+                else:
+                    fitness = wrapper(x)
                 solutions.set_evals(fitness)
 
         start_time = time.time()
@@ -554,6 +667,9 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
 
             def scipy_objective(x):
                 x_tensor = torch.tensor(x, dtype=torch.float64, device=self.device).unsqueeze(0)
+                if angle_mode:
+                    shifts = normalized_angles_to_shifts_torch(x_tensor, segments_torch, normalize_factor)
+                    return wrapper(shifts).item()
                 return wrapper(x_tensor).item()
 
             result = differential_evolution(
@@ -590,7 +706,11 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
 
                     def _evaluate_batch(inner_self, solutions):
                         x = solutions.values
-                        fitness = wrapper(x)
+                        if angle_mode:
+                            shifts = normalized_angles_to_shifts_torch(x, segments_torch, normalize_factor)
+                            fitness = wrapper(shifts)
+                        else:
+                            fitness = wrapper(x)
                         solutions.set_evals(fitness)
 
                 problem = AGProblemBounded()
@@ -624,13 +744,9 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                                           f"shifts_m={[f'{s:.2f}' for s in best_shifts_m]}")
                             logger.warning(f"Continuing with current best solution (graceful recovery)")
                         else:
-                            logger.error(f"CMA-ES crashed at iter {iter_num}, no valid population - using center")
-                            best_overall_x = torch.tensor((lb + ub) / 2, dtype=torch.float64, device=self.device)
-                            best_overall_fun = wrapper(best_overall_x.unsqueeze(0)).item()
+                            raise RuntimeError(f"CMA-ES crashed at iter {iter_num}, no valid population")
                     except Exception as inner_e:
-                        logger.error(f"CMA-ES crashed at iter {iter_num}, recovery failed: {inner_e}")
-                        best_overall_x = torch.tensor((lb + ub) / 2, dtype=torch.float64, device=self.device)
-                        best_overall_fun = wrapper(best_overall_x.unsqueeze(0)).item()
+                        raise RuntimeError(f"CMA-ES crashed at iter {iter_num}, recovery failed: {inner_e}")
 
                 # Only extract from population if we didn't recover from degeneration
                 if not cmaes_converged_early:
@@ -643,8 +759,7 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                             best_overall_x = pop.values[best_idx].clone()
 
                 if best_overall_x is None:
-                    best_overall_x = torch.tensor((lb + ub) / 2, dtype=torch.float64, device=self.device)
-                    best_overall_fun = wrapper(best_overall_x.unsqueeze(0)).item()
+                    raise RuntimeError("CMA-ES single mode failed: no valid solution found")
 
             else:
                 # CMA-ES with multi-population from generated centers (original approach)
@@ -684,8 +799,7 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                                 best_overall_x = best_x.clone()
 
                 if best_overall_x is None:
-                    best_overall_x = torch.tensor((lb + ub) / 2, dtype=torch.float64, device=self.device)
-                    best_overall_fun = wrapper(best_overall_x.unsqueeze(0)).item()
+                    raise RuntimeError("CMA-ES multi mode failed: no valid solution found")
 
         elif self.algorithm == 'MONTECARLO':
             # Pure random search on GPU - multi-iteration uniform sampling
@@ -706,7 +820,11 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                 random_samples = random_samples * (ub_tensor - lb_tensor) + lb_tensor
 
                 # Evaluate all samples at once (GPU batch)
-                fitness = wrapper(random_samples)
+                if angle_mode:
+                    shifts_samples = normalized_angles_to_shifts_torch(random_samples, segments_torch, normalize_factor)
+                    fitness = wrapper(shifts_samples)
+                else:
+                    fitness = wrapper(random_samples)
 
                 # Find best in this iteration
                 best_idx = fitness.argmin()
@@ -793,7 +911,11 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
             def pso_objective(x):
                 # x shape: [n_particles, n_dims]
                 x_tensor = torch.tensor(x, dtype=torch.float64, device=self.device)
-                costs = wrapper(x_tensor)
+                if angle_mode:
+                    shifts = normalized_angles_to_shifts_torch(x_tensor, segments_torch, normalize_factor)
+                    costs = wrapper(shifts)
+                else:
+                    costs = wrapper(x_tensor)
                 return costs.cpu().numpy()
 
             # PSO options
@@ -846,13 +968,20 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                             best_overall_x = best_x.clone()
 
             if best_overall_x is None:
-                # Fallback to center of bounds
-                best_overall_x = torch.tensor((lb + ub) / 2, dtype=torch.float64, device=self.device)
-                best_overall_fun = wrapper(best_overall_x.unsqueeze(0)).item()
+                raise RuntimeError("SNES failed: no valid solution found")
 
         elapsed = time.time() - start_time
 
-        return best_overall_fun, best_overall_x.cpu().tolist(), elapsed, wrapper
+        # Convert angles to shifts if in angle mode
+        if angle_mode:
+            angles_tensor = best_overall_x.unsqueeze(0)  # (1, K)
+            shifts_tensor = normalized_angles_to_shifts_torch(angles_tensor, segments_torch, normalize_factor)
+            optimal_shifts = shifts_tensor.squeeze(0).cpu().tolist()
+            logger.info(f"  ANGLE MODE: angles={[f'{a * normalize_factor:.2f}°' for a in best_overall_x.cpu().tolist()]}")
+        else:
+            optimal_shifts = best_overall_x.cpu().tolist()
+
+        return best_overall_fun, optimal_shifts, elapsed, wrapper
 
     def _apply_optimized_shifts(self, segments: List, optimal_shifts: List) -> List:
         """Apply optimized shifts to segments"""

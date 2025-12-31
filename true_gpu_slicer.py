@@ -108,11 +108,12 @@ def stitch_typewell_at_runtime(data: Dict[str, Any], mode: str = 'OLD') -> List[
 
     Args:
         data: Well data from dataset (contains pseudo_tvd, pseudo_gr, type_tvd, type_gr, norm_multiplier)
-        mode: 'OLD' = type×(1/mult), pseudo raw
-              'NEW' = pseudo×mult, type raw
+        mode: 'OLD' = type×(1/mult), pseudo raw (stitched)
+              'NEW' = pseudo×mult, type raw (stitched)
+              'ORIGINAL' = pure typeLog, no pseudo stitching
 
     Returns:
-        Stitched typeLog tvdSortedPoints
+        Stitched typeLog tvdSortedPoints (or pure typeLog if ORIGINAL)
     """
     norm_multiplier = data.get('norm_multiplier', 1.0)
 
@@ -121,6 +122,12 @@ def stitch_typewell_at_runtime(data: Dict[str, Any], mode: str = 'OLD') -> List[
     pseudo_gr = data['pseudo_gr'].cpu().numpy()
     type_tvd = data['type_tvd'].cpu().numpy()
     type_gr = data['type_gr'].cpu().numpy()
+
+    # ORIGINAL mode: pure typeLog without stitching
+    if mode == 'ORIGINAL':
+        logger.info(f"Using ORIGINAL typeLog (no pseudo stitching), {len(type_tvd)} points")
+        return [{'trueVerticalDepth': float(tvd), 'data': float(gr)}
+                for tvd, gr in zip(type_tvd, type_gr)]
 
     # Build dict format for extend_pseudo_with_typelog
     pseudo_dict = {
@@ -201,8 +208,9 @@ def slice_data_to_md(data: Dict[str, Any], current_md: float) -> Dict[str, Any]:
             'tvdSortedPoints': stitch_typewell_at_runtime(data, mode=NORMALIZATION_MODE)
         },
 
-        # When USE_PSEUDOTYPELOG=true, tvd_shift is always 0 (as in StarSteer)
-        'tvdTypewellShift': 0.0 if os.getenv('USE_PSEUDOTYPELOG', 'true').lower() == 'true' else data.get('tvd_typewell_shift', 0.0),
+        # When USE_PSEUDOTYPELOG=true, tvd_shift is 0 (pseudo already aligned)
+        # When using ORIGINAL typewell, need real tvd_typewell_shift
+        'tvdTypewellShift': 0.0 if NORMALIZATION_MODE != 'ORIGINAL' else data.get('tvd_typewell_shift', 0.0),
 
         'autoGeosteeringParameters': {
             'startMd': data.get('detected_start_md') or data.get('start_md', 0.0),
@@ -590,6 +598,16 @@ def main():
     parser.add_argument('--angle-sum-power', type=float, default=None,
                         help='Angle sum penalty power (default: from PYTHON_ANGLE_SUM_POWER env)')
 
+    # Telescope mode parameters
+    parser.add_argument('--telescope', action='store_true',
+                        help='Enable telescope mode: one long lever + short work segments')
+    parser.add_argument('--telescope-lever-md', type=float, default=None,
+                        help='Telescope lever END position as absolute MD in meters (e.g. 5944 for ~19500ft)')
+    parser.add_argument('--telescope-work-length', type=float, default=30.0,
+                        help='Telescope work segment length in meters (default: 30)')
+    parser.add_argument('--telescope-work-count', type=int, default=4,
+                        help='Number of work segments after lever (default: 4)')
+
     args = parser.parse_args()
 
     dataset_path = Path(args.dataset)
@@ -636,11 +654,17 @@ def main():
         mp.set_start_method('spawn', force=True)
 
         # Prepare args for workers
-        first_slice = args.first_slice_length if args.first_slice_length else args.slice_step
+        # For telescope mode, first_slice is calculated per-well in run_slicing (needs start_md)
+        first_slice = args.first_slice_length  # None if not specified, will be computed in run_slicing
         env_config = {
             'PYTHON_LOOKBACK_DISTANCE': args.lookback_distance,
             'PYTHON_MAX_SEGMENT_LENGTH': args.max_segment_length,
             'PYTHON_ANGLE_SUM_POWER': args.angle_sum_power,
+            'TELESCOPE_MODE': 'true' if args.telescope else None,
+            'TELESCOPE_LEVER_MD': args.telescope_lever_md if args.telescope else None,
+            'TELESCOPE_WORK_SEGMENT_LENGTH': args.telescope_work_length if args.telescope else None,
+            'TELESCOPE_WORK_SEGMENTS_COUNT': args.telescope_work_count if args.telescope else None,
+            'TELESCOPE_REWARD_START_SEGMENT': '1' if args.telescope else None,
         }
         worker_args = [
             (well_name, dataset[well_name], args.slice_step, work_dir, str(results_dir), args.algorithm, first_slice, env_config)
@@ -674,6 +698,15 @@ def main():
         if args.angle_sum_power:
             os.environ['PYTHON_ANGLE_SUM_POWER'] = str(args.angle_sum_power)
 
+        # Telescope mode
+        if args.telescope:
+            os.environ['TELESCOPE_MODE'] = 'true'
+            if args.telescope_lever_md:
+                os.environ['TELESCOPE_LEVER_MD'] = str(args.telescope_lever_md)
+            os.environ['TELESCOPE_WORK_SEGMENT_LENGTH'] = str(args.telescope_work_length)
+            os.environ['TELESCOPE_WORK_SEGMENTS_COUNT'] = str(args.telescope_work_count)
+            os.environ['TELESCOPE_REWARD_START_SEGMENT'] = '1'
+
         executor = GpuAutoGeosteeringExecutor(
             work_dir=work_dir,
             results_dir=str(results_dir)
@@ -693,7 +726,14 @@ def main():
             data['well_name'] = well_name
 
             try:
-                first_slice = args.first_slice_length if args.first_slice_length else args.slice_step
+                # Auto-calculate first_slice for telescope mode
+                if args.telescope and args.first_slice_length is None and args.telescope_lever_md:
+                    start_md = data.get('detected_start_md') or data.get('start_md', 0.0) or 0.0
+                    lever_length = args.telescope_lever_md - start_md
+                    first_slice = lever_length + (args.telescope_work_count - 1) * args.telescope_work_length
+                    logger.info(f"Telescope auto first_slice: {first_slice:.1f}m = ({args.telescope_lever_md} - {start_md:.1f}) + ({args.telescope_work_count}-1) * {args.telescope_work_length}")
+                else:
+                    first_slice = args.first_slice_length if args.first_slice_length else args.slice_step
                 result = run_slicing(data, executor, args.slice_step, first_slice)
                 metrics = compare_with_reference(result, data)
                 result['metrics'] = metrics
