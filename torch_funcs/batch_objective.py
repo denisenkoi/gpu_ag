@@ -160,29 +160,22 @@ def batch_objective_function_torch(
     else:
         trend_penalty = torch.zeros(batch_size, device=device, dtype=dtype)
 
-    # Calculate projection for all batches (always for ALL segments - geometry needed)
+    # Calculate projection - skip lever segment in telescope mode
     with record_function("projection"):
         success_mask, tvt_batch, synt_curve_batch, first_start_idx = calc_horizontal_projection_batch_torch(
-            well_data, typewell_data, segments_batch, tvd_to_typewell_shift
+            well_data, typewell_data, segments_batch, tvd_to_typewell_shift,
+            skip_segments=reward_start_segment_idx
         )
 
-    # Determine reward range (telescope mode: skip first segment(s) for Pearson/MSE)
+    # Get reward range indices
     last_end_idx = int(segments_torch[-1, 1].item())
-    K = segments_torch.shape[0]
-    if reward_start_segment_idx > 0 and reward_start_segment_idx < K:
-        reward_start_idx = int(segments_torch[reward_start_segment_idx, 0].item())
-    else:
-        reward_start_idx = first_start_idx
 
-    # Calculate offset for slicing synthetic curve
-    reward_offset = reward_start_idx - first_start_idx
-
-    # Get value array for REWARD range (may skip telescope lever segment)
-    value_slice = well_data['value'][reward_start_idx:last_end_idx + 1]
+    # Get value array for reward range (projection already starts from reward_start_segment)
+    value_slice = well_data['value'][first_start_idx:last_end_idx + 1]
     value_batch = value_slice.unsqueeze(0).expand(batch_size, -1)  # (batch, N_reward)
 
-    # Slice synthetic curve to match reward range
-    synt_curve_reward = synt_curve_batch[:, reward_offset:]  # (batch, N_reward)
+    # Synthetic curve already matches reward range (no offset needed)
+    synt_curve_reward = synt_curve_batch  # (batch, N_reward)
 
     # Check for NaN in synthetic curve (check full curve for projection validity)
     has_nan = torch.any(torch.isnan(synt_curve_batch), dim=1)
@@ -341,27 +334,21 @@ def compute_detailed_metrics_torch(
     else:
         angle_sum_penalty = torch.zeros(1, device=device, dtype=dtype)
 
-    # Projection
+    # Projection - skip lever segment in telescope mode
     success_mask, tvt_batch, synt_curve_batch, first_start_idx = calc_horizontal_projection_batch_torch(
-        well_data, typewell_data, segments_batch, tvd_to_typewell_shift
+        well_data, typewell_data, segments_batch, tvd_to_typewell_shift,
+        skip_segments=reward_start_segment_idx
     )
 
-    # Determine reward range (telescope mode: skip first segment(s) for Pearson/MSE)
+    # Get reward range indices
     last_end_idx = int(segments_torch[-1, 1].item())
-    K = segments_torch.shape[0]
-    if reward_start_segment_idx > 0 and reward_start_segment_idx < K:
-        reward_start_idx = int(segments_torch[reward_start_segment_idx, 0].item())
-    else:
-        reward_start_idx = first_start_idx
 
-    # Get value array for reward range
-    N_indices = last_end_idx - first_start_idx + 1
-    reward_offset = reward_start_idx - first_start_idx
-    value_slice = well_data['value'][reward_start_idx:last_end_idx + 1]
+    # Get value array for reward range (projection already starts from reward_start_segment)
+    value_slice = well_data['value'][first_start_idx:last_end_idx + 1]
     value_batch = value_slice.unsqueeze(0)
 
-    # MSE and Pearson (only on reward range, not including lever)
-    synt_reward = synt_curve_batch[:, reward_offset:reward_offset + value_slice.shape[0]]
+    # MSE and Pearson (synt_curve already matches reward range)
+    synt_reward = synt_curve_batch
     mse = mse_batch_torch(value_batch, synt_reward)
     pearson = pearson_batch_torch(value_batch, synt_reward)
 

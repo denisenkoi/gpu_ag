@@ -179,7 +179,7 @@ def calc_horizontal_projection_torch(well_data, typewell_data, segments_torch, t
     return True, well_data
 
 
-def calc_horizontal_projection_batch_torch(well_data, typewell_data, segments_batch, tvd_to_typewell_shift=0.0):
+def calc_horizontal_projection_batch_torch(well_data, typewell_data, segments_batch, tvd_to_typewell_shift=0.0, skip_segments=0):
     """
     Calculate horizontal projection for a batch of segment configurations.
     Batch version for parallel processing.
@@ -189,18 +189,20 @@ def calc_horizontal_projection_batch_torch(well_data, typewell_data, segments_ba
         typewell_data: dict with typewell tensors
         segments_batch: (batch, K, 6) tensor of segments
         tvd_to_typewell_shift: float shift value
+        skip_segments: number of leading segments to skip (for telescope lever)
 
     Returns:
         success_mask: (batch,) bool tensor
         tvt_batch: (batch, N_indices) tensor
         synt_curve_batch: (batch, N_indices) tensor
+        first_start_idx: starting index in well data
     """
     batch_size = segments_batch.shape[0]
     K = segments_batch.shape[1]
     device = segments_batch.device
 
-    # Get indices range from first batch (same for all)
-    first_start_idx = int(segments_batch[0, 0, 0].item())
+    # Get indices range - skip lever segments if requested
+    first_start_idx = int(segments_batch[0, skip_segments, 0].item())
     last_end_idx = int(segments_batch[0, -1, 1].item())
     N_indices = last_end_idx - first_start_idx + 1
 
@@ -213,9 +215,9 @@ def calc_horizontal_projection_batch_torch(well_data, typewell_data, segments_ba
     synt_curve_batch = torch.full((batch_size, N_indices), float('nan'), device=device, dtype=GPU_DTYPE)
     success_mask = torch.ones(batch_size, dtype=torch.bool, device=device)
 
-    # Calculate TVT for each segment (vectorized across batch)
+    # Calculate TVT for each segment (vectorized across batch), skip lever
     with record_function("proj_tvt_loop"):
-        for seg_idx in range(K):
+        for seg_idx in range(skip_segments, K):
             seg = segments_batch[:, seg_idx, :]  # (batch, 6)
 
             start_idx_rel = int(seg[0, 0].item()) - first_start_idx

@@ -43,6 +43,8 @@ def well_to_numpy(well):
     Returns:
         dict with numpy arrays
     """
+    # Use normalization_md_range if well is normalized, else md_range
+    md_range_for_denorm = getattr(well, 'normalization_md_range', well.md_range) if well.normalized else well.md_range
     return {
         'md': well.measured_depth.copy(),
         'vs': well.vs_thl.copy(),
@@ -50,7 +52,8 @@ def well_to_numpy(well):
         'value': well.value.copy(),
         'tvt': well.tvt.copy(),
         'synt_curve': well.synt_curve.copy(),
-        'md_range': well.md_range,
+        'md_range': md_range_for_denorm,
+        'min_md': well.min_md,
         'min_curve': well.min_curve,
         'max_curve': well.max_curve,
         'horizontal_well_step': well.horizontal_well_step,
