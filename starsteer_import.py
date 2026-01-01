@@ -196,7 +196,7 @@ class StarSteerImporter:
         # Write CLOSE_APP command
         cmd_data = {
             "command": "CLOSE_APP",
-            "params": {"save_changes": False}
+            "params": {"save_changes": True}
         }
         with open(self.commands_file, 'w') as f:
             json.dump(cmd_data, f, indent=2)

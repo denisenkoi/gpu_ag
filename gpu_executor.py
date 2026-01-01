@@ -595,6 +595,9 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                     use_telescope = True
                     logger.info(f"Telescope mode: lever={lever_length_m:.1f}m + "
                                f"{len(new_segments)-1} work segments @ {self.telescope_work_segment_length}m each")
+                    # Disable telescope for subsequent iterations - we're now in the target zone
+                    self.telescope_lever_md = None
+                    logger.info("Telescope: disabled for subsequent iterations (now in target zone)")
 
         # Track current mode for reward calculation
         self._current_use_telescope = use_telescope

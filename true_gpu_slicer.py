@@ -28,6 +28,9 @@ from copy import deepcopy
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing as mp
 
+# Peak detectors for auto telescope lever detection
+from peak_detectors import OtsuPeakDetector, MADPeakDetector, RollingStdDetector, RegionFinder
+
 # Add paths
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent / "cpu_baseline"))
@@ -208,9 +211,9 @@ def slice_data_to_md(data: Dict[str, Any], current_md: float) -> Dict[str, Any]:
             'tvdSortedPoints': stitch_typewell_at_runtime(data, mode=NORMALIZATION_MODE)
         },
 
-        # When USE_PSEUDOTYPELOG=true, tvd_shift is 0 (pseudo already aligned)
-        # When using ORIGINAL typewell, need real tvd_typewell_shift
-        'tvdTypewellShift': 0.0 if NORMALIZATION_MODE != 'ORIGINAL' else data.get('tvd_typewell_shift', 0.0),
+        # tvd_typewell_shift is needed for projection calculation
+        # TODO: verify if pseudo_stitched really doesn't need shift
+        'tvdTypewellShift': data.get('tvd_typewell_shift', 0.0),
 
         'autoGeosteeringParameters': {
             'startMd': data.get('detected_start_md') or data.get('start_md', 0.0),
@@ -549,6 +552,26 @@ def process_well_worker(args: Tuple) -> Dict[str, Any]:
 
     try:
         well_data['well_name'] = well_name
+
+        # Auto-detect telescope lever MD if requested
+        auto_detector = os.getenv('TELESCOPE_AUTO_DETECTOR')
+        telescope_mode = os.getenv('TELESCOPE_MODE') == 'true'
+        telescope_lever_md = os.getenv('TELESCOPE_LEVER_MD')
+
+        if telescope_mode and telescope_lever_md is None and auto_detector:
+            lookback = float(os.getenv('PYTHON_LOOKBACK_DISTANCE', 250))
+            detected_md = detect_telescope_lever_md(well_data, auto_detector, lookback)
+            os.environ['TELESCOPE_LEVER_MD'] = str(detected_md)
+            logger.info(f"[{well_name}] Auto-detected lever MD: {detected_md:.1f}m ({detected_md * 3.28084:.0f}ft) using {auto_detector}")
+
+            # Recalculate first_slice if not specified
+            if first_slice_length is None:
+                start_md = well_data.get('detected_start_md') or well_data.get('start_md', 0.0) or 0.0
+                work_length = float(os.getenv('TELESCOPE_WORK_SEGMENT_LENGTH', 30))
+                work_count = int(os.getenv('TELESCOPE_WORK_SEGMENTS_COUNT', 4))
+                lever_length = detected_md - start_md
+                first_slice_length = lever_length + (work_count - 1) * work_length
+
         result = run_slicing(well_data, executor, slice_step, first_slice_length)
         metrics = compare_with_reference(result, well_data)
         result['metrics'] = metrics
@@ -563,6 +586,46 @@ def process_well_worker(args: Tuple) -> Dict[str, Any]:
         }
     finally:
         executor.stop_daemon()
+
+
+def detect_telescope_lever_md(data: Dict[str, Any], detector_name: str, lookback_m: float = 250.0) -> float:
+    """
+    Auto-detect best telescope lever position using peak detectors.
+
+    Args:
+        data: Well data dict with log_md, log_gr
+        detector_name: 'otsu', 'rollingstd', or 'mad'
+        lookback_m: Region size in meters (default 250 = lookback distance)
+
+    Returns:
+        Best MD position for telescope lever
+    """
+    md = data['log_md'].cpu().numpy() if hasattr(data['log_md'], 'numpy') else np.array(data['log_md'])
+    gr = data['log_gr'].cpu().numpy() if hasattr(data['log_gr'], 'numpy') else np.array(data['log_gr'])
+
+    if detector_name == 'otsu':
+        detector = OtsuPeakDetector()
+        finder = RegionFinder(detector, search_fraction=0.33)
+        result = finder.find_best_region(gr, md, region_length_m=lookback_m)
+        return result.best_md
+
+    elif detector_name == 'rollingstd':
+        total_length = md[-1] - md[0]
+        search_start_md = md[-1] - total_length * 0.33
+        search_start_idx = np.searchsorted(md, search_start_md)
+        search_end_idx = len(md)
+        detector = RollingStdDetector(window_m=100.0)
+        best_md, _, _ = detector.find_best_region(gr, md, search_start_idx, search_end_idx, region_length_m=lookback_m)
+        return best_md
+
+    elif detector_name == 'mad':
+        detector = MADPeakDetector(k=1.5)
+        finder = RegionFinder(detector, search_fraction=0.33)
+        result = finder.find_best_region(gr, md, region_length_m=lookback_m)
+        return result.best_md
+
+    else:
+        raise ValueError(f"Unknown detector: {detector_name}")
 
 
 def main():
@@ -607,8 +670,17 @@ def main():
                         help='Telescope work segment length in meters (default: 30)')
     parser.add_argument('--telescope-work-count', type=int, default=4,
                         help='Number of work segments after lever (default: 4)')
+    parser.add_argument('--telescope-auto-detect', type=str, default=None,
+                        choices=['otsu', 'rollingstd', 'mad'],
+                        help='Auto-detect telescope lever position using peak detector (otsu/rollingstd/mad)')
 
     args = parser.parse_args()
+
+    # Fallback to .env for telescope auto-detect
+    if args.telescope_auto_detect is None:
+        env_detector = os.getenv('TELESCOPE_AUTO_DETECTOR')
+        if env_detector and env_detector.lower() in ['otsu', 'rollingstd', 'mad']:
+            args.telescope_auto_detect = env_detector.lower()
 
     dataset_path = Path(args.dataset)
     results_dir = Path(args.results_dir)
@@ -662,6 +734,7 @@ def main():
             'PYTHON_ANGLE_SUM_POWER': args.angle_sum_power,
             'TELESCOPE_MODE': 'true' if args.telescope else None,
             'TELESCOPE_LEVER_MD': args.telescope_lever_md if args.telescope else None,
+            'TELESCOPE_AUTO_DETECTOR': args.telescope_auto_detect if args.telescope else None,
             'TELESCOPE_WORK_SEGMENT_LENGTH': args.telescope_work_length if args.telescope else None,
             'TELESCOPE_WORK_SEGMENTS_COUNT': args.telescope_work_count if args.telescope else None,
             'TELESCOPE_REWARD_START_SEGMENT': '1' if args.telescope else None,
@@ -699,10 +772,12 @@ def main():
             os.environ['PYTHON_ANGLE_SUM_POWER'] = str(args.angle_sum_power)
 
         # Telescope mode
+        # NOTE: We do NOT pass TELESCOPE_LEVER_MD to executor - telescope segment creation
+        # has issues with bounds/initialization. Instead, we only use lever_md to calculate
+        # first_slice length, then executor runs in normal mode with big first_slice.
         if args.telescope:
             os.environ['TELESCOPE_MODE'] = 'true'
-            if args.telescope_lever_md:
-                os.environ['TELESCOPE_LEVER_MD'] = str(args.telescope_lever_md)
+            # TELESCOPE_LEVER_MD intentionally NOT set - use normal mode with calculated first_slice
             os.environ['TELESCOPE_WORK_SEGMENT_LENGTH'] = str(args.telescope_work_length)
             os.environ['TELESCOPE_WORK_SEGMENTS_COUNT'] = str(args.telescope_work_count)
             os.environ['TELESCOPE_REWARD_START_SEGMENT'] = '1'
@@ -726,12 +801,20 @@ def main():
             data['well_name'] = well_name
 
             try:
+                # Auto-detect telescope lever MD if requested
+                telescope_lever_md = args.telescope_lever_md
+                if args.telescope and telescope_lever_md is None and args.telescope_auto_detect:
+                    lookback = args.lookback_distance or float(os.getenv('PYTHON_LOOKBACK_DISTANCE', 250))
+                    telescope_lever_md = detect_telescope_lever_md(data, args.telescope_auto_detect, lookback)
+                    os.environ['TELESCOPE_LEVER_MD'] = str(telescope_lever_md)
+                    logger.info(f"Auto-detected telescope lever MD: {telescope_lever_md:.1f}m ({telescope_lever_md * 3.28084:.0f}ft) using {args.telescope_auto_detect}")
+
                 # Auto-calculate first_slice for telescope mode
-                if args.telescope and args.first_slice_length is None and args.telescope_lever_md:
+                if args.telescope and args.first_slice_length is None and telescope_lever_md:
                     start_md = data.get('detected_start_md') or data.get('start_md', 0.0) or 0.0
-                    lever_length = args.telescope_lever_md - start_md
+                    lever_length = telescope_lever_md - start_md
                     first_slice = lever_length + (args.telescope_work_count - 1) * args.telescope_work_length
-                    logger.info(f"Telescope auto first_slice: {first_slice:.1f}m = ({args.telescope_lever_md} - {start_md:.1f}) + ({args.telescope_work_count}-1) * {args.telescope_work_length}")
+                    logger.info(f"Telescope auto first_slice: {first_slice:.1f}m = ({telescope_lever_md:.1f} - {start_md:.1f}) + ({args.telescope_work_count}-1) * {args.telescope_work_length}")
                 else:
                     first_slice = args.first_slice_length if args.first_slice_length else args.slice_step
                 result = run_slicing(data, executor, args.slice_step, first_slice)
