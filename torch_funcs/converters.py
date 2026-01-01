@@ -8,7 +8,7 @@ import os
 import torch
 import numpy as np
 
-# Global dtype setting - float32 default (15x speedup), float64 for precision
+# Global dtype setting - float32 default (15x speedup), float64 for precision (use GPU_DTYPE=float64)
 _dtype_map = {'float16': torch.float16, 'float32': torch.float32, 'float64': torch.float64}
 GPU_DTYPE = _dtype_map.get(os.getenv('GPU_DTYPE', 'float32'), torch.float32)
 

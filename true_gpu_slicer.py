@@ -804,7 +804,8 @@ def main():
                 if args.telescope and telescope_lever_md is None and args.telescope_auto_detect:
                     lookback = args.lookback_distance or float(os.getenv('PYTHON_LOOKBACK_DISTANCE', 250))
                     telescope_lever_md = detect_telescope_lever_md(data, args.telescope_auto_detect, lookback)
-                    os.environ['TELESCOPE_LEVER_MD'] = str(telescope_lever_md)
+                    # NOTE: telescope mode disabled - lever segments produce wrong shifts
+                    # executor.set_telescope_lever_md(telescope_lever_md)
                     logger.info(f"Auto-detected telescope lever MD: {telescope_lever_md:.1f}m ({telescope_lever_md * 3.28084:.0f}ft) using {args.telescope_auto_detect}")
 
                 # Auto-calculate first_slice for telescope mode
