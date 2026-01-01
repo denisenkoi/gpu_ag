@@ -3,11 +3,15 @@ Batch objective function for parallel evaluation of population.
 
 This is the key function for GPU acceleration - evaluates 500 individuals in parallel.
 """
+import os
 import torch
-from .converters import update_segments_with_shifts_torch, calc_segment_angles_torch
+from torch.profiler import record_function
+from .converters import update_segments_with_shifts_torch, calc_segment_angles_torch, GPU_DTYPE
 from .projection import calc_horizontal_projection_batch_torch
 from .correlations import pearson_batch_torch, mse_batch_torch
 from .self_correlation import find_intersections_batch_torch
+
+GPU_PROFILE_ENABLED = os.getenv('GPU_PROFILE', 'false').lower() == 'true'
 
 
 def normalized_angles_to_shifts_torch(
@@ -102,10 +106,12 @@ def batch_objective_function_torch(
 
     # Update segments with new shifts for all batches
     # segments_batch: (batch, K, 6)
-    segments_batch = update_segments_with_shifts_torch(shifts_batch, segments_torch)
+    with record_function("update_segments"):
+        segments_batch = update_segments_with_shifts_torch(shifts_batch, segments_torch)
 
     # Calculate angles for all batches: (batch, K)
-    angles = calc_segment_angles_torch(segments_batch)
+    with record_function("calc_angles"):
+        angles = calc_segment_angles_torch(segments_batch)
 
     # Exponential penalty for angle violations: 1M * 100^max_excess
     angle_excess = torch.abs(angles) - angle_range
@@ -155,9 +161,10 @@ def batch_objective_function_torch(
         trend_penalty = torch.zeros(batch_size, device=device, dtype=dtype)
 
     # Calculate projection for all batches (always for ALL segments - geometry needed)
-    success_mask, tvt_batch, synt_curve_batch, first_start_idx = calc_horizontal_projection_batch_torch(
-        well_data, typewell_data, segments_batch, tvd_to_typewell_shift
-    )
+    with record_function("projection"):
+        success_mask, tvt_batch, synt_curve_batch, first_start_idx = calc_horizontal_projection_batch_torch(
+            well_data, typewell_data, segments_batch, tvd_to_typewell_shift
+        )
 
     # Determine reward range (telescope mode: skip first segment(s) for Pearson/MSE)
     last_end_idx = int(segments_torch[-1, 1].item())
@@ -182,10 +189,12 @@ def batch_objective_function_torch(
     success_mask = success_mask & ~has_nan
 
     # Calculate MSE for reward range (may exclude telescope lever)
-    mse = mse_batch_torch(value_batch, synt_curve_reward)
+    with record_function("mse"):
+        mse = mse_batch_torch(value_batch, synt_curve_reward)
 
     # Calculate Pearson for reward range (may exclude telescope lever)
-    pearson_raw = pearson_batch_torch(value_batch, synt_curve_reward)
+    with record_function("pearson"):
+        pearson_raw = pearson_batch_torch(value_batch, synt_curve_reward)
 
     # Debug output for reward range diagnostics
     import os
@@ -257,6 +266,11 @@ def batch_objective_function_torch(
 
     # Apply success mask - only projection failure causes inf
     metrics = torch.where(success_mask, metric_values, metrics)
+
+    # Scale for float16 stability (small values lose precision)
+    objective_scale = float(os.getenv('GPU_OBJECTIVE_SCALE', '1.0'))
+    if objective_scale != 1.0:
+        metrics = metrics * objective_scale
 
     return metrics
 
@@ -431,7 +445,7 @@ class TorchObjectiveWrapper:
             self.typewell_data = typewell_data
 
         if not isinstance(segments_torch, torch.Tensor):
-            self.segments_torch = torch.tensor(segments_torch, dtype=torch.float64, device=device)
+            self.segments_torch = torch.tensor(segments_torch, dtype=GPU_DTYPE, device=device)
         else:
             self.segments_torch = segments_torch.to(device)
 
@@ -470,7 +484,7 @@ class TorchObjectiveWrapper:
             tensor (batch,) of metric values
         """
         if not isinstance(shifts_batch, torch.Tensor):
-            shifts_batch = torch.tensor(shifts_batch, dtype=torch.float64, device=self.device)
+            shifts_batch = torch.tensor(shifts_batch, dtype=GPU_DTYPE, device=self.device)
 
         if shifts_batch.device != self.device:
             shifts_batch = shifts_batch.to(self.device)
@@ -510,7 +524,7 @@ class TorchObjectiveWrapper:
             scalar metric value
         """
         if not isinstance(shifts, torch.Tensor):
-            shifts = torch.tensor(shifts, dtype=torch.float64, device=self.device)
+            shifts = torch.tensor(shifts, dtype=GPU_DTYPE, device=self.device)
 
         # Add batch dimension
         shifts_batch = shifts.unsqueeze(0)
@@ -529,7 +543,7 @@ class TorchObjectiveWrapper:
             dict with objective, pearson, mse, angles, penalties
         """
         if not isinstance(shifts, torch.Tensor):
-            shifts = torch.tensor(shifts, dtype=torch.float64, device=self.device)
+            shifts = torch.tensor(shifts, dtype=GPU_DTYPE, device=self.device)
 
         # Use modified segments_torch if first_start_shift provided
         segments = self.segments_torch

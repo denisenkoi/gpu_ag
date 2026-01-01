@@ -37,7 +37,7 @@ from ag_numerical.ag_optimizer_utils import calculate_optimization_bounds, calcu
 
 # Torch imports
 from numpy_funcs.converters import well_to_numpy, typewell_to_numpy, segments_to_numpy
-from torch_funcs.converters import numpy_to_torch, segments_numpy_to_torch
+from torch_funcs.converters import numpy_to_torch, segments_numpy_to_torch, GPU_DTYPE
 from torch_funcs.batch_objective import TorchObjectiveWrapper, normalized_angles_to_shifts_torch
 
 # EvoTorch
@@ -47,8 +47,12 @@ from evotorch.operators import OnePointCrossOver, TwoPointCrossOver, SimulatedBi
 import pyswarms as ps
 from scipy.optimize import differential_evolution
 from gr_utils import apply_gr_smoothing
+from torch.profiler import profile, record_function, ProfilerActivity
 
 logger = logging.getLogger(__name__)
+
+# GPU Profiling flag
+GPU_PROFILE_ENABLED = os.getenv('GPU_PROFILE', 'false').lower() == 'true'
 
 
 def generate_population_centers(K: int, dip_range: float, step: float = 1.0) -> np.ndarray:
@@ -299,7 +303,7 @@ def build_reference_segments_torch(ref_segments_json, well, md_start_m, md_end_m
     if not segments:
         return None
 
-    return torch.tensor(segments, dtype=torch.float64, device=device)
+    return torch.tensor(segments, dtype=GPU_DTYPE, device=device)
 
 
 class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
@@ -652,7 +656,7 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         else:
             # Shift mode: bounds for end_shifts
             bounds = calculate_optimization_bounds(segments, angle_range=self.angle_range, accumulative=True)
-        bounds_tensor = torch.tensor(bounds, dtype=torch.float64, device=self.device)
+        bounds_tensor = torch.tensor(bounds, dtype=GPU_DTYPE, device=self.device)
 
         # Calculate horizontal projection
         self.ag_well.calc_horizontal_projection(self.ag_typewell, segments, self.tvd_to_typewell_shift)
@@ -748,7 +752,7 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                     objective_sense="min",
                     solution_length=K,
                     initial_bounds=(lb, ub),
-                    dtype=torch.float64,
+                    dtype=GPU_DTYPE,
                     device=self.device
                 )
 
@@ -772,7 +776,7 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
             bounds_list = list(zip(lb, ub))
 
             def scipy_objective(x):
-                x_tensor = torch.tensor(x, dtype=torch.float64, device=self.device).unsqueeze(0)
+                x_tensor = torch.tensor(x, dtype=GPU_DTYPE, device=self.device).unsqueeze(0)
                 if angle_mode:
                     shifts = normalized_angles_to_shifts_torch(x_tensor, segments_torch, normalize_factor)
                     return wrapper(shifts).item()
@@ -790,7 +794,7 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                 workers=1  # GPU wrapper not thread-safe
             )
             best_overall_fun = result.fun
-            best_overall_x = torch.tensor(result.x, dtype=torch.float64, device=self.device)
+            best_overall_x = torch.tensor(result.x, dtype=GPU_DTYPE, device=self.device)
 
         elif self.algorithm == 'CMAES':
             if self.cmaes_mode == 'single':
@@ -806,17 +810,20 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                             objective_sense="min",
                             solution_length=K,
                             initial_bounds=(lb, ub),  # Uniform init within bounds
-                            dtype=torch.float64,
+                            dtype=GPU_DTYPE,
                             device=self.device
                         )
 
                     def _evaluate_batch(inner_self, solutions):
                         x = solutions.values
                         if angle_mode:
-                            shifts = normalized_angles_to_shifts_torch(x, segments_torch, normalize_factor)
-                            fitness = wrapper(shifts)
+                            with record_function("angles_to_shifts"):
+                                shifts = normalized_angles_to_shifts_torch(x, segments_torch, normalize_factor)
+                            with record_function("objective_wrapper"):
+                                fitness = wrapper(shifts)
                         else:
-                            fitness = wrapper(x)
+                            with record_function("objective_wrapper"):
+                                fitness = wrapper(x)
                         solutions.set_evals(fitness)
 
                 problem = AGProblemBounded()
@@ -831,28 +838,56 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                 searcher = CMAES(problem, **searcher_kwargs)
 
                 cmaes_converged_early = False
-                try:
-                    for iter_num in range(self.maxiter):
-                        searcher.step()
-                except Exception as e:
-                    # Graceful recovery: save current best and continue
-                    cmaes_converged_early = True
+
+                # GPU Profiling wrapper
+                if GPU_PROFILE_ENABLED:
+                    logger.info("GPU_PROFILE=true: Starting profiler...")
+                    with profile(
+                        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                        record_shapes=True,
+                        profile_memory=True,
+                        with_stack=True
+                    ) as prof:
+                        try:
+                            for iter_num in range(self.maxiter):
+                                with record_function("cmaes_step"):
+                                    searcher.step()
+                        except Exception as e:
+                            cmaes_converged_early = True
+
+                    # Print top 20 operations by CUDA time
+                    print("\n" + "="*80)
+                    print("GPU PROFILER: Top 20 operations by CUDA time")
+                    print("="*80)
+                    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
+                    print("="*80 + "\n")
+
+                    # Also save to file
+                    prof.export_chrome_trace("/tmp/gpu_ag_trace.json")
+                    logger.info("Trace saved to /tmp/gpu_ag_trace.json (open in chrome://tracing)")
+                else:
                     try:
-                        stdev = searcher._sigma if hasattr(searcher, '_sigma') else 'N/A'
-                        pop = searcher.population
-                        if pop is not None and hasattr(pop, 'values') and pop.evals is not None:
-                            best_idx = pop.evals.argmin()
-                            best_overall_fun = pop.evals[best_idx].item()
-                            best_overall_x = pop.values[best_idx].clone()
-                            best_shifts_m = best_overall_x.cpu().numpy() * self.fixed_md_range
-                            logger.warning(f"CMA-ES degenerated at iter {iter_num}/{self.maxiter}: "
-                                          f"stdev={stdev}, fun={best_overall_fun:.6f}, "
-                                          f"shifts_m={[f'{s:.2f}' for s in best_shifts_m]}")
-                            logger.warning(f"Continuing with current best solution (graceful recovery)")
-                        else:
-                            raise RuntimeError(f"CMA-ES crashed at iter {iter_num}, no valid population")
-                    except Exception as inner_e:
-                        raise RuntimeError(f"CMA-ES crashed at iter {iter_num}, recovery failed: {inner_e}")
+                        for iter_num in range(self.maxiter):
+                            searcher.step()
+                    except Exception as e:
+                        # Graceful recovery: save current best and continue
+                        cmaes_converged_early = True
+                        try:
+                            stdev = searcher._sigma if hasattr(searcher, '_sigma') else 'N/A'
+                            pop = searcher.population
+                            if pop is not None and hasattr(pop, 'values') and pop.evals is not None:
+                                best_idx = pop.evals.argmin()
+                                best_overall_fun = pop.evals[best_idx].item()
+                                best_overall_x = pop.values[best_idx].clone()
+                                best_shifts_m = best_overall_x.cpu().numpy() * self.fixed_md_range
+                                logger.warning(f"CMA-ES degenerated at iter {iter_num}/{self.maxiter}: "
+                                              f"stdev={stdev}, fun={best_overall_fun:.6f}, "
+                                              f"shifts_m={[f'{s:.2f}' for s in best_shifts_m]}")
+                                logger.warning(f"Continuing with current best solution (graceful recovery)")
+                            else:
+                                raise RuntimeError(f"CMA-ES crashed at iter {iter_num}, no valid population")
+                        except Exception as inner_e:
+                            raise RuntimeError(f"CMA-ES crashed at iter {iter_num}, recovery failed: {inner_e}")
 
                 # Only extract from population if we didn't recover from degeneration
                 if not cmaes_converged_early:
@@ -878,7 +913,7 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                     # Convert angles to shifts
                     center_shifts = center_angles / self.angle_range * (ub - lb) / 2 + (ub + lb) / 2
                     center_shifts = np.clip(center_shifts, lb, ub)
-                    center_init = torch.tensor(center_shifts, dtype=torch.float64, device=self.device)
+                    center_init = torch.tensor(center_shifts, dtype=GPU_DTYPE, device=self.device)
 
                     problem = AGProblem()
                     stdev_min = float(os.getenv('GPU_STDEV_MIN', '0.001'))
@@ -914,15 +949,15 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
             total_samples = samples * iterations
             logger.info(f"MONTECARLO: {samples} samples x {iterations} iterations = {total_samples} total, bounds={K}D")
 
-            lb_tensor = torch.tensor(lb, dtype=torch.float64, device=self.device)
-            ub_tensor = torch.tensor(ub, dtype=torch.float64, device=self.device)
+            lb_tensor = torch.tensor(lb, dtype=GPU_DTYPE, device=self.device)
+            ub_tensor = torch.tensor(ub, dtype=GPU_DTYPE, device=self.device)
 
             best_overall_fun = float('inf')
             best_overall_x = None
 
             for it in range(iterations):
                 # Generate uniform random samples within bounds
-                random_samples = torch.rand(samples, K, dtype=torch.float64, device=self.device)
+                random_samples = torch.rand(samples, K, dtype=GPU_DTYPE, device=self.device)
                 random_samples = random_samples * (ub_tensor - lb_tensor) + lb_tensor
 
                 # Evaluate all samples at once (GPU batch)
@@ -1016,7 +1051,7 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
             # Objective function for pyswarms (expects shape [n_particles, n_dims])
             def pso_objective(x):
                 # x shape: [n_particles, n_dims]
-                x_tensor = torch.tensor(x, dtype=torch.float64, device=self.device)
+                x_tensor = torch.tensor(x, dtype=GPU_DTYPE, device=self.device)
                 if angle_mode:
                     shifts = normalized_angles_to_shifts_torch(x_tensor, segments_torch, normalize_factor)
                     costs = wrapper(shifts)
@@ -1046,7 +1081,7 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
             )
 
             best_overall_fun = best_cost
-            best_overall_x = torch.tensor(best_pos, dtype=torch.float64, device=self.device)
+            best_overall_x = torch.tensor(best_pos, dtype=GPU_DTYPE, device=self.device)
 
         else:  # SNES (default)
             for restart in range(self.n_restarts):
@@ -1403,7 +1438,7 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         detailed = {}
         angles_str = ""
         if wrapper and optimal_shifts:
-            shifts_tensor = torch.tensor(optimal_shifts, dtype=torch.float64, device=self.device)
+            shifts_tensor = torch.tensor(optimal_shifts, dtype=GPU_DTYPE, device=self.device)
             detailed = wrapper.compute_detailed(shifts_tensor)
             angles_str = ",".join([f"{a:.2f}" for a in detailed.get('angles_deg', [])])
 
@@ -1492,7 +1527,7 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
 
             # Compute reference metrics using reference geometry
             # Use same reward_start_segment_idx as optimization (single source of truth)
-            ref_shifts_tensor = torch.tensor(ref_shifts, dtype=torch.float64, device=self.device)
+            ref_shifts_tensor = torch.tensor(ref_shifts, dtype=GPU_DTYPE, device=self.device)
             ref_metrics = compute_detailed_metrics_torch(
                 ref_shifts_tensor,
                 wrapper.well_data,

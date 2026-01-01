@@ -4,7 +4,10 @@ PyTorch implementation of horizontal projection calculations.
 Calculates tvt (true vertical thickness) and synt_curve (synthetic curve).
 Supports both single evaluation and batch processing.
 """
+import os
 import torch
+from torch.profiler import record_function
+from .converters import GPU_DTYPE
 
 
 def linear_interpolation_torch(x1, y1, x2, y2, x):
@@ -206,50 +209,66 @@ def calc_horizontal_projection_batch_torch(well_data, typewell_data, segments_ba
     tvd_well = well_data['tvd'][first_start_idx:last_end_idx + 1]
 
     # Initialize output
-    tvt_batch = torch.full((batch_size, N_indices), float('nan'), device=device, dtype=torch.float64)
-    synt_curve_batch = torch.full((batch_size, N_indices), float('nan'), device=device, dtype=torch.float64)
+    tvt_batch = torch.full((batch_size, N_indices), float('nan'), device=device, dtype=GPU_DTYPE)
+    synt_curve_batch = torch.full((batch_size, N_indices), float('nan'), device=device, dtype=GPU_DTYPE)
     success_mask = torch.ones(batch_size, dtype=torch.bool, device=device)
 
     # Calculate TVT for each segment (vectorized across batch)
-    for seg_idx in range(K):
-        seg = segments_batch[:, seg_idx, :]  # (batch, 6)
+    with record_function("proj_tvt_loop"):
+        for seg_idx in range(K):
+            seg = segments_batch[:, seg_idx, :]  # (batch, 6)
 
-        start_idx_rel = int(seg[0, 0].item()) - first_start_idx
-        end_idx_rel = int(seg[0, 1].item()) - first_start_idx
+            start_idx_rel = int(seg[0, 0].item()) - first_start_idx
+            end_idx_rel = int(seg[0, 1].item()) - first_start_idx
 
-        start_vs = seg[:, 2:3]  # (batch, 1)
-        end_vs = seg[:, 3:4]    # (batch, 1)
-        start_shift = seg[:, 4:5]  # (batch, 1)
-        end_shift = seg[:, 5:6]    # (batch, 1)
+            start_vs = seg[:, 2:3]  # (batch, 1)
+            end_vs = seg[:, 3:4]    # (batch, 1)
+            start_shift = seg[:, 4:5]  # (batch, 1)
+            end_shift = seg[:, 5:6]    # (batch, 1)
 
-        depth_shift = end_shift - start_shift
+            depth_shift = end_shift - start_shift
 
-        # VS values for this segment
-        vs_seg = vs[start_idx_rel:end_idx_rel + 1].unsqueeze(0)  # (1, seg_len)
+            # VS values for this segment
+            vs_seg = vs[start_idx_rel:end_idx_rel + 1].unsqueeze(0)  # (1, seg_len)
 
-        # Calculate delta_vs per batch
-        delta_vs = end_vs - start_vs  # (batch, 1)
+            # Calculate delta_vs per batch
+            delta_vs = end_vs - start_vs  # (batch, 1)
 
-        # Check for zero delta_vs
-        zero_mask = (delta_vs.squeeze() == 0)
-        success_mask = success_mask & ~zero_mask
+            # Check for zero delta_vs
+            zero_mask = (delta_vs.squeeze() == 0)
+            success_mask = success_mask & ~zero_mask
 
-        # Calculate shifts for all batches
-        # shifts shape: (batch, seg_len)
-        shifts = start_shift + depth_shift * (vs_seg - start_vs) / delta_vs
+            # Calculate shifts for all batches
+            # shifts shape: (batch, seg_len)
+            shifts = start_shift + depth_shift * (vs_seg - start_vs) / delta_vs
 
-        # TVD values for this segment
-        tvd_seg = tvd_well[start_idx_rel:end_idx_rel + 1].unsqueeze(0)  # (1, seg_len)
+            # TVD values for this segment
+            tvd_seg = tvd_well[start_idx_rel:end_idx_rel + 1].unsqueeze(0)  # (1, seg_len)
 
-        # Calculate TVT
-        tvt_seg = tvd_seg - shifts - tvd_to_typewell_shift
+            # Calculate TVT
+            tvt_seg = tvd_seg - shifts - tvd_to_typewell_shift
 
-        # Store in output
-        tvt_batch[:, start_idx_rel:end_idx_rel + 1] = tvt_seg
+            # Store in output
+            tvt_batch[:, start_idx_rel:end_idx_rel + 1] = tvt_seg
 
     # Check TVT bounds
     tvt_min = torch.min(typewell_data['tvd'])
     tvt_max = torch.max(typewell_data['tvd'])
+
+    # Debug TVT bounds
+    import os
+    if os.getenv('DEBUG_REWARD_RANGE', 'false').lower() == 'true':
+        import logging
+        logger = logging.getLogger('projection')
+        # Handle NaN in min/max
+        tvt_valid = tvt_batch[0][~torch.isnan(tvt_batch[0])]
+        if len(tvt_valid) > 0:
+            tvt_actual_min = tvt_valid.min().item()
+            tvt_actual_max = tvt_valid.max().item()
+        else:
+            tvt_actual_min = float('nan')
+            tvt_actual_max = float('nan')
+        logger.info(f"DEBUG TVT: batch[0] range=[{tvt_actual_min:.4f}, {tvt_actual_max:.4f}], typewell bounds=[{tvt_min.item():.4f}, {tvt_max.item():.4f}]")
 
     out_of_bounds = torch.any(tvt_batch > tvt_max, dim=1) | torch.any(tvt_batch < tvt_min, dim=1)
     success_mask = success_mask & ~out_of_bounds
@@ -264,7 +283,8 @@ def calc_horizontal_projection_batch_torch(well_data, typewell_data, segments_ba
 
     synt_flat = torch.full_like(tvt_flat, float('nan'))
     if valid_flat.any():
-        synt_flat[valid_flat] = tvt2value_torch(typewell_data, tvt_flat[valid_flat])
+        with record_function("proj_tvt2value"):
+            synt_flat[valid_flat] = tvt2value_torch(typewell_data, tvt_flat[valid_flat])
 
     synt_curve_batch = synt_flat.reshape(batch_size, N_indices)
 

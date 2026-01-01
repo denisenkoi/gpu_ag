@@ -4,8 +4,13 @@ Converters between numpy arrays and PyTorch tensors.
 All tensors use float64 for numerical precision matching with numpy.
 Device can be 'cpu' or 'cuda' for GPU acceleration.
 """
+import os
 import torch
 import numpy as np
+
+# Global dtype setting - float32 default (15x speedup), float64 for precision
+_dtype_map = {'float16': torch.float16, 'float32': torch.float32, 'float64': torch.float64}
+GPU_DTYPE = _dtype_map.get(os.getenv('GPU_DTYPE', 'float32'), torch.float32)
 
 
 def numpy_to_torch(data_dict, device='cuda'):
@@ -23,7 +28,7 @@ def numpy_to_torch(data_dict, device='cuda'):
 
     for key, value in data_dict.items():
         if isinstance(value, np.ndarray):
-            result[key] = torch.tensor(value, dtype=torch.float64, device=device)
+            result[key] = torch.tensor(value, dtype=GPU_DTYPE, device=device)
         elif isinstance(value, (int, float, bool)):
             result[key] = value  # Keep scalars as Python types
         else:
@@ -64,7 +69,7 @@ def segments_numpy_to_torch(segments_np, device='cuda'):
     Returns:
         (K, 6) torch tensor
     """
-    return torch.tensor(segments_np, dtype=torch.float64, device=device)
+    return torch.tensor(segments_np, dtype=GPU_DTYPE, device=device)
 
 
 def update_segments_with_shifts_torch(shifts, segments_torch):
