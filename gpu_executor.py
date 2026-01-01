@@ -401,7 +401,8 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
 
         # Angle optimization mode: optimize angles instead of shifts
         # When enabled, CMA-ES optimizes normalized angles (0.1 = 1°), then converts to shifts
-        self.angle_optimization_mode = os.getenv('ANGLE_OPTIMIZATION_MODE', 'false').lower() == 'true'
+        # Default: true (angle mode works better for telescope with long lever)
+        self.angle_optimization_mode = os.getenv('ANGLE_OPTIMIZATION_MODE', 'true').lower() == 'true'
         self.angle_normalize_factor = float(os.getenv('ANGLE_NORMALIZE_FACTOR', '10.0'))
 
         # Telescope cheat mode: initialize lever angle from reference trajectory
