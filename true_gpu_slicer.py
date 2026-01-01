@@ -387,6 +387,11 @@ def run_slicing(data: Dict[str, Any], executor: GpuAutoGeosteeringExecutor,
 
     current_md = start_md + first_slice_length  # First slice length (default=slice_step)
 
+    # If first slice would exceed max_md, slice to end
+    if current_md > max_md:
+        logger.info(f"First slice {first_slice_length:.1f}m exceeds well length, capping to max_md={max_md:.1f}m")
+        current_md = max_md
+
     # Build initial manual interpretation from ref_shifts up to start_md
     work_interpretation = build_manual_interpretation_to_md(data, start_md)
     logger.info(f"Manual interpretation: {len(work_interpretation)} segments up to start_md")
@@ -396,7 +401,8 @@ def run_slicing(data: Dict[str, Any], executor: GpuAutoGeosteeringExecutor,
 
     logger.info(f"Starting slicing: start_md={start_md:.1f}, max_md={max_md:.1f}, step={slice_step}")
 
-    while current_md < max_md:
+    processed_max_md = False
+    while current_md <= max_md:
         iteration += 1
 
         # Slice data to current_md
@@ -420,10 +426,13 @@ def run_slicing(data: Dict[str, Any], executor: GpuAutoGeosteeringExecutor,
         logger.info(f"Iteration {iteration}: MD={current_md:.1f}m, "
                     f"segments={len(work_interpretation)}, time={elapsed:.2f}s")
 
+        if current_md >= max_md:
+            processed_max_md = True
+            break
         current_md += slice_step
 
-    # Final slice with all data
-    if current_md != max_md:
+    # Final slice with all data (only if not already processed)
+    if not processed_max_md and current_md != max_md:
         iteration += 1
         well_data = slice_data_to_md(data, max_md)
         well_data['interpretation'] = {'segments': work_interpretation}
