@@ -386,12 +386,9 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         # PseudoTypeLog support
         self.use_pseudo_typelog = os.getenv('USE_PSEUDOTYPELOG', 'false').lower() == 'true'
 
-        # Telescope mode: skip first segment(s) in Pearson/MSE reward
-        # TELESCOPE_REWARD_START_SEGMENT=1 means reward calculated from segment 1 (skipping segment 0)
-        self.telescope_reward_start_segment = int(os.getenv('TELESCOPE_REWARD_START_SEGMENT', '0'))
-
         # Telescope segment creation: one long lever + multiple short work segments
         # TELESCOPE_MODE=true enables telescope segment creation
+        # When telescope mode is active, lever segment is automatically skipped in projection/reward
         self.telescope_mode = os.getenv('TELESCOPE_MODE', 'false').lower() == 'true'
         # TELESCOPE_LEVER_MD = absolute MD where lever ends (e.g. 5944 for ~19500ft)
         telescope_lever_md_str = os.getenv('TELESCOPE_LEVER_MD')
@@ -432,12 +429,17 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         logger.info(f"GPU executor initialized: device={self.device}, algorithm={self.algorithm}, "
                     f"cmaes_mode={self.cmaes_mode}, single_popsize={self.single_popsize}, "
                     f"restarts={self.n_restarts}, popsize={self.popsize}, maxiter={self.maxiter}, "
-                    f"use_pseudo={self.use_pseudo_typelog}, telescope_reward_start={self.telescope_reward_start_segment}{telescope_info}")
+                    f"use_pseudo={self.use_pseudo_typelog}{telescope_info}")
 
     def set_algorithm(self, algorithm: str):
         """Override algorithm from CLI parameter"""
         self.algorithm = algorithm.upper()
         logger.info(f"Algorithm overridden to: {self.algorithm}")
+
+    def set_telescope_lever_md(self, lever_md: float):
+        """Set telescope lever MD (for per-well auto-detection)"""
+        self.telescope_lever_md = lever_md
+        logger.info(f"Telescope lever MD set to: {lever_md:.1f}m")
 
     def start_daemon(self):
         """Start GPU executor"""
@@ -687,8 +689,8 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         typewell_torch = numpy_to_torch(typewell_np, device=self.device)
         segments_torch = segments_numpy_to_torch(segments_np, device=self.device)
 
-        # Determine reward_start_segment_idx: 1 for telescope mode, 0 for normal
-        current_reward_start = self.telescope_reward_start_segment if getattr(self, '_current_use_telescope', False) else 0
+        # Determine reward_start_segment_idx: 1 for telescope mode (skip lever projection), 0 for normal
+        current_reward_start = 1 if getattr(self, '_current_use_telescope', False) else 0
 
         wrapper = TorchObjectiveWrapper(
             well_data=well_torch,

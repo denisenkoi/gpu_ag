@@ -737,7 +737,6 @@ def main():
             'TELESCOPE_AUTO_DETECTOR': args.telescope_auto_detect if args.telescope else None,
             'TELESCOPE_WORK_SEGMENT_LENGTH': args.telescope_work_length if args.telescope else None,
             'TELESCOPE_WORK_SEGMENTS_COUNT': args.telescope_work_count if args.telescope else None,
-            'TELESCOPE_REWARD_START_SEGMENT': '1' if args.telescope else None,
         }
         worker_args = [
             (well_name, dataset[well_name], args.slice_step, work_dir, str(results_dir), args.algorithm, first_slice, env_config)
@@ -780,7 +779,6 @@ def main():
             # TELESCOPE_LEVER_MD intentionally NOT set - use normal mode with calculated first_slice
             os.environ['TELESCOPE_WORK_SEGMENT_LENGTH'] = str(args.telescope_work_length)
             os.environ['TELESCOPE_WORK_SEGMENTS_COUNT'] = str(args.telescope_work_count)
-            os.environ['TELESCOPE_REWARD_START_SEGMENT'] = '1'
 
         executor = GpuAutoGeosteeringExecutor(
             work_dir=work_dir,
