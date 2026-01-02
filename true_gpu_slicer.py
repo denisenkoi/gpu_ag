@@ -30,6 +30,7 @@ import multiprocessing as mp
 
 # Peak detectors for auto telescope lever detection
 from peak_detectors import OtsuPeakDetector, MADPeakDetector, RollingStdDetector, RegionFinder
+from smart_segmenter import SmartSegmenter
 
 # Add paths
 sys.path.insert(0, str(Path(__file__).parent))
@@ -446,12 +447,116 @@ def run_slicing(data: Dict[str, Any], executor: GpuAutoGeosteeringExecutor,
         logger.info(f"Final iteration {iteration}: MD={max_md:.1f}m, "
                     f"segments={len(work_interpretation)}, time={elapsed:.2f}s")
 
+    # Compute final GR metrics for full interpretation
+    gr_metrics = executor.compute_full_interpretation_metrics()
+
+    # Detailed analysis: shifts comparison and metrics by windows
+    executor.analyze_interpretation_detailed(window_size=200.0)
+
     return {
         'well_name': data.get('well_name', 'Unknown'),
         'iterations': iteration,
         'total_time': total_time,
         'final_segments': len(work_interpretation),
-        'interpretation': work_interpretation
+        'interpretation': work_interpretation,
+        'gr_metrics': gr_metrics
+    }
+
+
+def run_slicing_smart(data: Dict[str, Any], executor: GpuAutoGeosteeringExecutor) -> Dict[str, Any]:
+    """
+    Run slicing using SmartSegmenter for adaptive segment boundaries.
+
+    Args:
+        data: Well data from dataset (with well_name added)
+        executor: GPU executor instance
+
+    Returns:
+        Dict with final interpretation and metrics
+    """
+    # Get start MD
+    start_md = data.get('detected_start_md') or data.get('start_md', 0.0)
+    if start_md is None:
+        start_md = 0.0
+
+    # Get initial shift from reference interpretation
+    initial_shift = interpolate_shift_at_md(data, start_md)
+    logger.info(f"Smart mode: initial shift at start_md={start_md:.1f}: {initial_shift:.2f}m")
+
+    # Build initial manual interpretation from ref_shifts up to start_md
+    work_interpretation = build_manual_interpretation_to_md(data, start_md)
+    logger.info(f"Manual interpretation: {len(work_interpretation)} segments up to start_md")
+
+    # Initialize SmartSegmenter
+    segmenter = SmartSegmenter(data)
+
+    iteration = 0
+    total_time = 0.0
+    current_shift = initial_shift
+
+    log_md_np = data['log_md'].cpu().numpy()
+    max_md = float(log_md_np[-1])
+
+    logger.info(f"Starting smart slicing: start_md={start_md:.1f}, max_md={max_md:.1f}")
+
+    while not segmenter.is_finished:
+        iteration += 1
+
+        # Get next slice from SmartSegmenter
+        slice_result = segmenter.next_slice()
+        if slice_result is None:
+            break
+
+        # Get MD range for this slice
+        if slice_result.segment_mds:
+            slice_end_md = slice_result.segment_mds[-1][1]
+        else:
+            break
+
+        # Slice data to slice end MD
+        well_data = slice_data_to_md(data, slice_end_md)
+        well_data['interpretation'] = {'segments': work_interpretation}
+
+        # Run optimization with smart indices
+        start_time = time.time()
+
+        if iteration == 1:
+            # First iteration: initialize well (creates manual segments from work_interpretation)
+            result = executor.initialize_well(well_data)
+
+        # Add smart segments and optimize
+        result = executor.update_well_smart(
+            well_data,
+            segment_mds=slice_result.segment_mds,
+            stitch_shift=current_shift
+        )
+
+        elapsed = time.time() - start_time
+        total_time += elapsed
+
+        # Update work interpretation
+        work_interpretation = result['interpretation']['segments']
+
+        # Update current_shift for next iteration (from last segment end_shift)
+        if work_interpretation:
+            current_shift = work_interpretation[-1].get('endShift', current_shift)
+
+        logger.info(f"Smart iteration {iteration}: {len(slice_result.segment_indices)} segments, "
+                   f"MD={slice_end_md:.1f}m, time={elapsed:.2f}s, is_final={slice_result.is_final}")
+
+    # Compute final GR metrics for full interpretation
+    gr_metrics = executor.compute_full_interpretation_metrics()
+
+    # Detailed analysis: shifts comparison and metrics by windows
+    executor.analyze_interpretation_detailed(window_size=200.0)
+
+    return {
+        'well_name': data.get('well_name', 'Unknown'),
+        'iterations': iteration,
+        'total_time': total_time,
+        'final_segments': len(work_interpretation),
+        'interpretation': work_interpretation,
+        'gr_metrics': gr_metrics
     }
 
 
@@ -562,26 +667,34 @@ def process_well_worker(args: Tuple) -> Dict[str, Any]:
     try:
         well_data['well_name'] = well_name
 
-        # Auto-detect telescope lever MD if requested
-        auto_detector = os.getenv('TELESCOPE_AUTO_DETECTOR')
-        telescope_mode = os.getenv('TELESCOPE_MODE') == 'true'
-        telescope_lever_md = os.getenv('TELESCOPE_LEVER_MD')
+        # Check for smart mode
+        smart_mode = os.getenv('SMART_MODE') == 'true'
 
-        if telescope_mode and telescope_lever_md is None and auto_detector:
-            lookback = float(os.getenv('PYTHON_LOOKBACK_DISTANCE', 250))
-            detected_md = detect_telescope_lever_md(well_data, auto_detector, lookback)
-            os.environ['TELESCOPE_LEVER_MD'] = str(detected_md)
-            logger.info(f"[{well_name}] Auto-detected lever MD: {detected_md:.1f}m ({detected_md * 3.28084:.0f}ft) using {auto_detector}")
+        if smart_mode:
+            # Use SmartSegmenter for adaptive boundaries
+            logger.info(f"[{well_name}] Running in SMART mode")
+            result = run_slicing_smart(well_data, executor)
+        else:
+            # Auto-detect telescope lever MD if requested
+            auto_detector = os.getenv('TELESCOPE_AUTO_DETECTOR')
+            telescope_mode = os.getenv('TELESCOPE_MODE') == 'true'
+            telescope_lever_md = os.getenv('TELESCOPE_LEVER_MD')
 
-            # Recalculate first_slice if not specified
-            if first_slice_length is None:
-                start_md = well_data.get('detected_start_md') or well_data.get('start_md', 0.0) or 0.0
-                work_length = float(os.getenv('TELESCOPE_WORK_SEGMENT_LENGTH', 30))
-                work_count = int(os.getenv('TELESCOPE_WORK_SEGMENTS_COUNT', 4))
-                lever_length = detected_md - start_md
-                first_slice_length = lever_length + (work_count - 1) * work_length
+            if telescope_mode and telescope_lever_md is None and auto_detector:
+                lookback = float(os.getenv('PYTHON_LOOKBACK_DISTANCE', 250))
+                detected_md = detect_telescope_lever_md(well_data, auto_detector, lookback)
+                os.environ['TELESCOPE_LEVER_MD'] = str(detected_md)
+                logger.info(f"[{well_name}] Auto-detected lever MD: {detected_md:.1f}m ({detected_md * 3.28084:.0f}ft) using {auto_detector}")
 
-        result = run_slicing(well_data, executor, slice_step, first_slice_length)
+                # Recalculate first_slice if not specified
+                if first_slice_length is None:
+                    start_md = well_data.get('detected_start_md') or well_data.get('start_md', 0.0) or 0.0
+                    work_length = float(os.getenv('TELESCOPE_WORK_SEGMENT_LENGTH', 30))
+                    work_count = int(os.getenv('TELESCOPE_WORK_SEGMENTS_COUNT', 4))
+                    lever_length = detected_md - start_md
+                    first_slice_length = lever_length + (work_count - 1) * work_length
+
+            result = run_slicing(well_data, executor, slice_step, first_slice_length)
         metrics = compare_with_reference(result, well_data)
         result['metrics'] = metrics
         result['well_name'] = well_name
@@ -682,6 +795,8 @@ def main():
     parser.add_argument('--telescope-auto-detect', type=str, default=None,
                         choices=['otsu', 'rollingstd', 'mad'],
                         help='Auto-detect telescope lever position using peak detector (otsu/rollingstd/mad)')
+    parser.add_argument('--smart', action='store_true',
+                        help='Use SmartSegmenter for adaptive segment boundaries based on peaks')
 
     args = parser.parse_args()
 
@@ -746,6 +861,7 @@ def main():
             'TELESCOPE_AUTO_DETECTOR': args.telescope_auto_detect if args.telescope else None,
             'TELESCOPE_WORK_SEGMENT_LENGTH': args.telescope_work_length if args.telescope else None,
             'TELESCOPE_WORK_SEGMENTS_COUNT': args.telescope_work_count if args.telescope else None,
+            'SMART_MODE': 'true' if args.smart else None,
         }
         worker_args = [
             (well_name, dataset[well_name], args.slice_step, work_dir, str(results_dir), args.algorithm, first_slice, env_config)
@@ -817,15 +933,22 @@ def main():
                     # executor.set_telescope_lever_md(telescope_lever_md)
                     logger.info(f"Auto-detected telescope lever MD: {telescope_lever_md:.1f}m ({telescope_lever_md * 3.28084:.0f}ft) using {args.telescope_auto_detect}")
 
-                # Auto-calculate first_slice for telescope mode
-                if args.telescope and args.first_slice_length is None and telescope_lever_md:
-                    start_md = data.get('detected_start_md') or data.get('start_md', 0.0) or 0.0
-                    lever_length = telescope_lever_md - start_md
-                    first_slice = lever_length + (args.telescope_work_count - 1) * args.telescope_work_length
-                    logger.info(f"Telescope auto first_slice: {first_slice:.1f}m = ({telescope_lever_md:.1f} - {start_md:.1f}) + ({args.telescope_work_count}-1) * {args.telescope_work_length}")
+                # Smart mode uses SmartSegmenter
+                if args.smart:
+                    logger.info(f"Running in SMART mode")
+                    result = run_slicing_smart(data, executor)
                 else:
-                    first_slice = args.first_slice_length if args.first_slice_length else args.slice_step
-                result = run_slicing(data, executor, args.slice_step, first_slice)
+                    # Auto-calculate first_slice for telescope mode
+                    if args.telescope and args.first_slice_length is None and telescope_lever_md:
+                        start_md = data.get('detected_start_md') or data.get('start_md', 0.0) or 0.0
+                        lever_length = telescope_lever_md - start_md
+                        first_slice = lever_length + (args.telescope_work_count - 1) * args.telescope_work_length
+                        logger.info(f"Telescope auto first_slice: {first_slice:.1f}m = ({telescope_lever_md:.1f} - {start_md:.1f}) + ({args.telescope_work_count}-1) * {args.telescope_work_length}")
+                    else:
+                        # Default first_slice = lookback_distance (120m) for sufficient segment coverage
+                        lookback = args.lookback_distance or float(os.getenv('PYTHON_LOOKBACK_DISTANCE', 120))
+                        first_slice = args.first_slice_length if args.first_slice_length else lookback
+                    result = run_slicing(data, executor, args.slice_step, first_slice)
                 metrics = compare_with_reference(result, data)
                 result['metrics'] = metrics
                 all_results.append(result)

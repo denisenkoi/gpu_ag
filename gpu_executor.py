@@ -55,6 +55,115 @@ logger = logging.getLogger(__name__)
 GPU_PROFILE_ENABLED = os.getenv('GPU_PROFILE', 'false').lower() == 'true'
 
 
+def compute_gr_metrics(interpretation: List, start_md: float, end_md: float,
+                       well: Well, typewell: TypeWell, tvd_shift: float,
+                       device: str = 'cuda', debug: bool = False) -> Dict[str, float]:
+    """
+    Compute GR metrics (Pearson, MSE) for interpretation in MD range.
+
+    ONE function for both ref and auto interpretations.
+    No wrapper, no segment indices, no magic.
+
+    Args:
+        interpretation: List of Segment objects
+        start_md: Start MD in meters
+        end_md: End MD in meters
+        well: Well object with trajectory and GR
+        typewell: TypeWell object
+        tvd_shift: TVD to typewell shift in meters
+        device: torch device
+        debug: print debug info
+
+    Returns:
+        dict with 'pearson', 'mse', 'n_points'
+    """
+    from torch_funcs.projection import calc_horizontal_projection_batch_torch
+    from torch_funcs.correlations import pearson_torch, mse_torch
+
+    # Find segments in range [start_md, end_md]
+    segments_in_range = []
+    for seg in interpretation:
+        if seg.end_md <= start_md:
+            continue
+        if seg.start_md >= end_md:
+            break
+        segments_in_range.append(deepcopy(seg))  # Always copy to avoid modifying original
+
+    if not segments_in_range:
+        return {'pearson': float('nan'), 'mse': float('nan'), 'n_points': 0}
+
+    # Truncate first/last segments to exact range
+    first_seg = segments_in_range[0]
+    last_seg = segments_in_range[-1]
+
+    if first_seg.start_md < start_md:
+        ratio = (start_md - first_seg.start_md) / (first_seg.end_md - first_seg.start_md)
+        first_seg.start_md = start_md
+        first_seg.start_idx = well.md2idx(start_md)
+        first_seg.start_vs = well.vs_thl[first_seg.start_idx]
+        first_seg.start_shift = first_seg.start_shift + ratio * (first_seg.end_shift - first_seg.start_shift)
+
+    if last_seg.end_md > end_md:
+        ratio = (end_md - last_seg.start_md) / (last_seg.end_md - last_seg.start_md)
+        last_seg.end_md = end_md
+        last_seg.end_idx = well.md2idx(end_md)
+        last_seg.end_vs = well.vs_thl[last_seg.end_idx]
+        last_seg.end_shift = last_seg.start_shift + ratio * (last_seg.end_shift - last_seg.start_shift)
+
+    # Convert to torch format
+    segments_np = segments_to_numpy(segments_in_range, well)
+    segments_torch = segments_numpy_to_torch(segments_np, device=device)
+
+    well_np = well_to_numpy(well)
+    typewell_np = typewell_to_numpy(typewell)
+    well_torch = numpy_to_torch(well_np, device=device)
+    typewell_torch = numpy_to_torch(typewell_np, device=device)
+
+    # Add batch dimension for projection
+    segments_batch = segments_torch.unsqueeze(0)  # (1, K, 6)
+
+    # Compute projection - returns synt_curve for range [first_seg.start_idx, last_seg.end_idx]
+    success, tvt, synt_curve, proj_first_idx = calc_horizontal_projection_batch_torch(
+        well_torch, typewell_torch, segments_batch, tvd_shift,
+        skip_segments=0
+    )
+
+    if debug:
+        logger.info(f"  DEBUG compute_gr_metrics: MD={start_md:.1f}-{end_md:.1f}, "
+                    f"segments={len(segments_in_range)}, success={success[0].item()}, "
+                    f"proj_first_idx={proj_first_idx}, synt_shape={synt_curve.shape}")
+
+    # Check success
+    if not success[0].item():
+        logger.warning(f"  Projection FAILED for {len(segments_in_range)} segments")
+        return {'pearson': float('nan'), 'mse': float('nan'), 'n_points': 0}
+
+    # synt_curve covers from proj_first_idx to proj_first_idx + synt_curve.shape[1] - 1
+    # We want gr_actual from the same range
+    proj_last_idx = proj_first_idx + synt_curve.shape[1] - 1
+
+    gr_actual = well_torch['value'][proj_first_idx:proj_last_idx + 1]
+    gr_synth = synt_curve[0, :]
+
+    if debug:
+        nan_count = torch.isnan(gr_synth).sum().item()
+        logger.info(f"  DEBUG: gr_actual len={len(gr_actual)}, gr_synth len={len(gr_synth)}, NaN count={nan_count}")
+
+    # Remove NaN
+    valid_mask = ~torch.isnan(gr_synth) & ~torch.isnan(gr_actual)
+    gr_actual = gr_actual[valid_mask]
+    gr_synth = gr_synth[valid_mask]
+
+    if len(gr_actual) < 10:
+        return {'pearson': float('nan'), 'mse': float('nan'), 'n_points': len(gr_actual)}
+
+    # Compute metrics
+    pearson = pearson_torch(gr_actual.unsqueeze(0), gr_synth.unsqueeze(0)).item()
+    mse = mse_torch(gr_actual.unsqueeze(0), gr_synth.unsqueeze(0)).item()
+
+    return {'pearson': pearson, 'mse': mse, 'n_points': len(gr_actual)}
+
+
 def generate_population_centers(K: int, dip_range: float, step: float = 1.0) -> np.ndarray:
     """
     Generate initial centers for multi-population optimization.
@@ -285,20 +394,10 @@ def build_reference_segments_torch(ref_segments_json, well, md_start_m, md_end_m
         start_vs = well.vs_thl[start_idx]
         end_vs = well.vs_thl[end_idx]
 
-        # Normalize VS and shifts if well is not already normalized
-        if well.normalized:
-            # VS already normalized
-            start_vs_norm = start_vs
-            end_vs_norm = end_vs
-        else:
-            start_vs_norm = (start_vs - well.min_vs) / md_range
-            end_vs_norm = (end_vs - well.min_vs) / md_range
-
-        # Shifts always come from reference (absolute meters), need normalization
-        start_shift_norm = clipped_start_shift / md_range
-        end_shift_norm = clipped_end_shift / md_range
-
-        segments.append([start_idx, end_idx, start_vs_norm, end_vs_norm, start_shift_norm, end_shift_norm])
+        # NO NORMALIZATION - keep everything in meters
+        # VS from well (already in meters if well not normalized)
+        # Shifts from reference (already in meters)
+        segments.append([start_idx, end_idx, start_vs, end_vs, clipped_start_shift, clipped_end_shift])
 
     if not segments:
         return None
@@ -452,6 +551,140 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         logger.info("Stopping GPU AutoGeosteering executor")
         self.optimization_logger.print_statistics()
 
+    def compute_full_interpretation_metrics(self) -> Dict[str, Any]:
+        """
+        Compute GR metrics for full interpretation range.
+
+        Uses compute_gr_metrics() for both auto and reference interpretations.
+        Same function, just different inputs.
+
+        Returns:
+            dict with 'auto' and 'ref' metrics (pearson, mse, n_points)
+        """
+        if not self.interpretation:
+            return {'auto': {}, 'ref': {}}
+
+        # Get MD range from interpretation
+        start_md = self.interpretation[0].start_md
+        end_md = self.interpretation[-1].end_md
+
+        # Auto interpretation metrics
+        auto_metrics = compute_gr_metrics(
+            self.interpretation, start_md, end_md,
+            self.ag_well, self.ag_typewell, self.tvd_to_typewell_shift,
+            device=self.device, debug=True
+        )
+
+        # Reference interpretation metrics (if available)
+        ref_metrics = {'pearson': float('nan'), 'mse': float('nan'), 'n_points': 0}
+        if self.reference_segments:
+            # Convert ref JSON to Segment objects
+            ref_interpretation = self._normalize_manual_to_segments(
+                self.reference_segments, self.ag_well
+            )
+            if ref_interpretation:
+                ref_metrics = compute_gr_metrics(
+                    ref_interpretation, start_md, end_md,
+                    self.ag_well, self.ag_typewell, self.tvd_to_typewell_shift,
+                    device=self.device
+                )
+
+        logger.info(f"=== Full Interpretation GR Metrics ===")
+        logger.info(f"  Range: {start_md:.1f} - {end_md:.1f} m ({len(self.interpretation)} segments)")
+        logger.info(f"  {'':12} | {'Auto':>12} | {'Reference':>12} | {'Diff':>10}")
+        logger.info(f"  {'-'*12}-+-{'-'*12}-+-{'-'*12}-+-{'-'*10}")
+        logger.info(f"  {'Pearson':12} | {auto_metrics['pearson']:>12.6f} | {ref_metrics['pearson']:>12.6f} | {auto_metrics['pearson'] - ref_metrics['pearson']:>+10.6f}")
+        logger.info(f"  {'MSE':12} | {auto_metrics['mse']:>12.6f} | {ref_metrics['mse']:>12.6f} | {auto_metrics['mse'] - ref_metrics['mse']:>+10.6f}")
+
+        return {'auto': auto_metrics, 'ref': ref_metrics}
+
+    def analyze_interpretation_detailed(self, window_size: float = 200.0) -> None:
+        """
+        Detailed analysis: shifts comparison and metrics by windows.
+
+        Shows:
+        1. Shift differences AUTO vs REF at key MD points
+        2. Pearson/MSE by windows from start to end
+        """
+        if not self.interpretation:
+            logger.info("No interpretation to analyze")
+            return
+
+        # Get ref interpretation
+        ref_interpretation = []
+        if self.reference_segments:
+            ref_interpretation = self._normalize_manual_to_segments(
+                self.reference_segments, self.ag_well
+            )
+
+        start_md = self.interpretation[0].start_md
+        end_md = self.interpretation[-1].end_md
+
+        logger.info(f"\n=== Detailed Interpretation Analysis ===")
+        logger.info(f"  Range: {start_md:.1f} - {end_md:.1f} m")
+
+        # 1. Shifts comparison at segment boundaries
+        logger.info(f"\n--- Shift Comparison (AUTO vs REF) ---")
+        logger.info(f"  {'MD (m)':>10} | {'AUTO shift':>12} | {'REF shift':>12} | {'Diff':>10}")
+        logger.info(f"  {'-'*10}-+-{'-'*12}-+-{'-'*12}-+-{'-'*10}")
+
+        # Sample at regular intervals
+        sample_mds = list(range(int(start_md), int(end_md), 100)) + [int(end_md)]
+
+        for md in sample_mds:
+            auto_shift = self._get_shift_at_md(self.interpretation, md)
+            ref_shift = self._get_shift_at_md(ref_interpretation, md) if ref_interpretation else float('nan')
+            diff = auto_shift - ref_shift if not np.isnan(ref_shift) else float('nan')
+            logger.info(f"  {md:>10.1f} | {auto_shift:>+12.2f} | {ref_shift:>+12.2f} | {diff:>+10.2f}")
+
+        # 2. Metrics by windows
+        logger.info(f"\n--- Metrics by Windows ({window_size:.0f}m) ---")
+        logger.info(f"  {'Window':>15} | {'Auto Pearson':>12} | {'Ref Pearson':>12} | {'Auto MSE':>10} | {'Ref MSE':>10}")
+        logger.info(f"  {'-'*15}-+-{'-'*12}-+-{'-'*12}-+-{'-'*10}-+-{'-'*10}")
+
+        current_md = start_md
+        while current_md < end_md:
+            window_end = min(current_md + window_size, end_md)
+
+            auto_m = compute_gr_metrics(
+                self.interpretation, current_md, window_end,
+                self.ag_well, self.ag_typewell, self.tvd_to_typewell_shift,
+                device=self.device
+            )
+
+            if ref_interpretation:
+                ref_m = compute_gr_metrics(
+                    ref_interpretation, current_md, window_end,
+                    self.ag_well, self.ag_typewell, self.tvd_to_typewell_shift,
+                    device=self.device
+                )
+            else:
+                ref_m = {'pearson': float('nan'), 'mse': float('nan')}
+
+            logger.info(f"  {current_md:.0f}-{window_end:.0f}m | {auto_m['pearson']:>12.4f} | {ref_m['pearson']:>12.4f} | {auto_m['mse']:>10.2f} | {ref_m['mse']:>10.2f}")
+
+            current_md = window_end
+
+    def _get_shift_at_md(self, interpretation: List, md: float) -> float:
+        """Get interpolated shift at given MD"""
+        if not interpretation:
+            return float('nan')
+
+        for seg in interpretation:
+            if seg.start_md <= md <= seg.end_md:
+                if seg.end_md == seg.start_md:
+                    return seg.start_shift
+                ratio = (md - seg.start_md) / (seg.end_md - seg.start_md)
+                return seg.start_shift + ratio * (seg.end_shift - seg.start_shift)
+
+        # Before first or after last
+        if md < interpretation[0].start_md:
+            return interpretation[0].start_shift
+        if md > interpretation[-1].end_md:
+            return interpretation[-1].end_shift
+
+        return float('nan')
+
     def _create_typewell(self, well_data: Dict[str, Any]) -> TypeWell:
         """Create TypeWell from well_data.
 
@@ -467,9 +700,8 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         return well_data.get('tvdTypewellShift', 0.0)
 
     def _normalize_manual_to_segments(self, manual_json: List[Dict], well: Well) -> List:
-        """Convert manual interpretation JSON to normalized Segment objects"""
+        """Convert manual interpretation JSON to Segment objects (NO NORMALIZATION - meters)"""
         segments = []
-        md_range = self.fixed_md_range if self.fixed_md_range else well.md_range
         min_md = self.fixed_min_md if self.fixed_min_md else well.min_md
 
         for i, seg_json in enumerate(manual_json):
@@ -488,22 +720,22 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
             start_md_m = max(start_md_m, min_md)
             end_md_m = min(end_md_m, well.max_md)
 
-            start_md_norm = (start_md_m - min_md) / md_range
-            end_md_norm = (end_md_m - min_md) / md_range
-            start_idx = int(well.md2idx(start_md_norm))
-            end_idx = int(well.md2idx(end_md_norm))
+            # NO NORMALIZATION - use meters directly
+            start_idx = int(well.md2idx(start_md_m))
+            end_idx = int(well.md2idx(end_md_m))
 
             if start_idx >= end_idx:
                 continue
 
-            start_shift = seg_json.get('startShift', 0.0) / md_range
-            end_shift = seg_json.get('endShift', 0.0) / md_range
+            # Shifts in meters (no normalization)
+            start_shift = seg_json.get('startShift', 0.0)
+            end_shift = seg_json.get('endShift', 0.0)
 
             segment = Segment(well, start_idx=start_idx, start_shift=start_shift,
                             end_idx=end_idx, end_shift=end_shift)
             segments.append(segment)
 
-        logger.debug(f"Converted {len(manual_json)} manual JSON -> {len(segments)} normalized Segments")
+        logger.debug(f"Converted {len(manual_json)} manual JSON -> {len(segments)} Segments (meters)")
         return segments
 
     def _truncate_interpretation_at_md(self, truncate_md: float, well: Well) -> float:
@@ -558,12 +790,11 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         if self.telescope_mode and self.telescope_lever_md is not None:
             # Telescope mode: one long lever + multiple short work segments
             # Calculate lever_length from absolute MD
-            # Note: well.measured_depth is normalized, convert back to absolute
-            start_md_norm = well.measured_depth[start_idx]
-            start_md_abs = start_md_norm * self.fixed_md_range + self.fixed_min_md
-            lever_length_m = self.telescope_lever_md - start_md_abs
+            # NO NORMALIZATION - measured_depth already in meters
+            start_md_m = well.measured_depth[start_idx]
+            lever_length_m = self.telescope_lever_md - start_md_m
             if lever_length_m <= 0:
-                logger.warning(f"Telescope: lever_md={self.telescope_lever_md} <= start_md={start_md_abs:.1f}, skipping telescope")
+                logger.warning(f"Telescope: lever_md={self.telescope_lever_md} <= start_md={start_md_m:.1f}, skipping telescope")
             else:
                 lever_length_idx = int(lever_length_m / well.horizontal_well_step)
                 work_segment_length_idx = int(self.telescope_work_segment_length / well.horizontal_well_step)
@@ -738,9 +969,8 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
             ub_deg = ub * self.angle_normalize_factor
             logger.info(f"  DEBUG bounds (degrees): lb={[f'{x:.2f}' for x in lb_deg]}, ub={[f'{x:.2f}' for x in ub_deg]}")
         else:
-            lb_m = lb * self.fixed_md_range
-            ub_m = ub * self.fixed_md_range
-            logger.info(f"  DEBUG bounds (meters): lb={[f'{x:.2f}' for x in lb_m]}, ub={[f'{x:.2f}' for x in ub_m]}")
+            # NO NORMALIZATION - bounds already in meters
+            logger.info(f"  DEBUG bounds (meters): lb={[f'{x:.2f}' for x in lb]}, ub={[f'{x:.2f}' for x in ub]}")
         stdev_init = (ub - lb).mean() / 2.0  # was /4.0 - wider initial distribution
 
         # Capture for nested class
@@ -882,10 +1112,11 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                                 best_idx = pop.evals.argmin()
                                 best_overall_fun = pop.evals[best_idx].item()
                                 best_overall_x = pop.values[best_idx].clone()
-                                best_shifts_m = best_overall_x.cpu().numpy() * self.fixed_md_range
+                                # NO NORMALIZATION - shifts already in meters (or normalized angles)
+                                best_x_display = best_overall_x.cpu().numpy()
                                 logger.warning(f"CMA-ES degenerated at iter {iter_num}/{self.maxiter}: "
                                               f"stdev={stdev}, fun={best_overall_fun:.6f}, "
-                                              f"shifts_m={[f'{s:.2f}' for s in best_shifts_m]}")
+                                              f"x={[f'{s:.2f}' for s in best_x_display]}")
                                 logger.warning(f"Continuing with current best solution (graceful recovery)")
                             else:
                                 raise RuntimeError(f"CMA-ES crashed at iter {iter_num}, no valid population")
@@ -1137,21 +1368,18 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         return optimized_segments
 
     def _denormalize_segments_to_json(self, segments) -> List[Dict[str, Any]]:
-        """Denormalize segment shifts from normalized to meters"""
-        md_range = self.fixed_md_range if self.fixed_md_range else self.ag_well.md_range
-        min_md = self.fixed_min_md if self.fixed_min_md else self.ag_well.min_md
-
-        denorm_segments = []
+        """Convert Segment objects to JSON (NO NORMALIZATION - already in meters)"""
+        json_segments = []
         for seg in segments:
-            denorm_seg = {
-                'startMd': seg.start_md * md_range + min_md,
-                'endMd': seg.end_md * md_range + min_md,
-                'startShift': seg.start_shift * md_range,
-                'endShift': seg.end_shift * md_range
+            json_seg = {
+                'startMd': seg.start_md,  # already in meters
+                'endMd': seg.end_md,      # already in meters
+                'startShift': seg.start_shift,  # already in meters
+                'endShift': seg.end_shift       # already in meters
             }
-            denorm_segments.append(denorm_seg)
+            json_segments.append(json_seg)
 
-        return denorm_segments
+        return json_segments
 
     def _save_interpretation_file(self):
         """Save FULL interpretation to file for StarSteer export"""
@@ -1245,15 +1473,14 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         logger.info(f"Fixed planning horizon: min_md={self.fixed_min_md:.2f}, "
                     f"fixed_md_range={self.fixed_md_range:.2f}")
 
-        # Normalize with fixed md_range
-        # Create normalized copy of typewell (raw is kept for re-normalization on update)
+        # NO NORMALIZATION - work with raw meters
+        # Keep typewell copy for consistency
         self.ag_typewell = deepcopy(self.ag_typewell_raw)
-        max_curve_value = max(self.ag_well.max_curve, self.ag_typewell.value.max())
-        self.ag_well.normalize(max_curve_value, self.ag_typewell.min_depth, self.fixed_md_range)
-        self.ag_typewell.normalize(max_curve_value, self.ag_well.min_depth, self.fixed_md_range)
-
-        # Normalize TVD shift
-        self.tvd_to_typewell_shift = self.tvd_to_typewell_shift / self.fixed_md_range
+        # NOTE: normalize() calls commented out - data stays in meters
+        # self.ag_well.normalize(max_curve_value, self.ag_typewell.min_depth, self.fixed_md_range)
+        # self.ag_typewell.normalize(max_curve_value, self.ag_well.min_depth, self.fixed_md_range)
+        # self.tvd_to_typewell_shift = self.tvd_to_typewell_shift / self.fixed_md_range
+        # tvd_to_typewell_shift stays in meters
 
         # STEP 1: Convert manual to Segments
         self.interpretation = self._normalize_manual_to_segments(manual_segments_json, self.ag_well)
@@ -1293,11 +1520,8 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
             segments_to_optimize, self.start_idx, prev_segment_angle
         )
 
-        # DEBUG: Log raw shifts from optimizer
-        logger.info(f"  RAW optimal_shifts (normalized): {[f'{s:.6f}' for s in optimal_shifts]}")
-        # Denormalize to meters for human readability
-        raw_shifts_m = [s * self.fixed_md_range for s in optimal_shifts]
-        logger.info(f"  RAW optimal_shifts (meters): {[f'{s:.2f}' for s in raw_shifts_m]}")
+        # DEBUG: Log raw shifts from optimizer (NO NORMALIZATION - already in meters)
+        logger.info(f"  RAW optimal_shifts (meters): {[f'{s:.2f}' for s in optimal_shifts]}")
 
         # Compute detailed metrics comparison
         self._log_metrics_comparison(
@@ -1309,8 +1533,8 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         for i, opt_seg in zip(optimize_indices, optimized_segments):
             self.interpretation[i] = opt_seg
 
-        # Log
-        self._log_optimization_result('init', self.ag_well.measured_depth[-1] * self.fixed_md_range + self.fixed_min_md,
+        # Log (NO NORMALIZATION - measured_depth already in meters)
+        self._log_optimization_result('init', self.ag_well.measured_depth[-1],
                                       best_fun, elapsed, wrapper, optimal_shifts, segments_to_optimize)
 
         # STEP 5: Save
@@ -1336,18 +1560,18 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         assert self.interpretation is not None, "Well not initialized"
 
         updated_well = Well(well_data)
-        # Re-normalize typewell with new max_curve_value to keep consistent scaling
+        # NO NORMALIZATION - work with raw meters
         self.ag_typewell = deepcopy(self.ag_typewell_raw)
-        max_curve_value = max(updated_well.max_curve, self.ag_typewell.value.max())
-        updated_well.normalize(max_curve_value, self.ag_typewell.min_depth, self.fixed_md_range)
-        self.ag_typewell.normalize(max_curve_value, updated_well.min_depth, self.fixed_md_range)
+        # NOTE: normalize() calls commented out - data stays in meters
+        # updated_well.normalize(max_curve_value, self.ag_typewell.min_depth, self.fixed_md_range)
+        # self.ag_typewell.normalize(max_curve_value, updated_well.min_depth, self.fixed_md_range)
         self.ag_well = updated_well
 
-        current_md = updated_well.measured_depth[-1]
+        current_md = updated_well.measured_depth[-1]  # now in meters
         current_idx = len(updated_well.measured_depth) - 1
 
-        # Calculate lookback
-        lookback_md = current_md - self.lookback_distance / self.fixed_md_range
+        # Calculate lookback (lookback_distance already in meters)
+        lookback_md = current_md - self.lookback_distance
         lookback_idx = updated_well.md2idx(lookback_md)
 
         if lookback_idx < self.start_idx:
@@ -1386,11 +1610,8 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
             segments_to_optimize, lookback_idx, prev_segment_angle
         )
 
-        # DEBUG: Log raw shifts from optimizer
-        logger.info(f"  RAW optimal_shifts (normalized): {[f'{s:.6f}' for s in optimal_shifts]}")
-        # Denormalize to meters for human readability
-        raw_shifts_m = [s * self.fixed_md_range for s in optimal_shifts]
-        logger.info(f"  RAW optimal_shifts (meters): {[f'{s:.2f}' for s in raw_shifts_m]}")
+        # DEBUG: Log raw shifts from optimizer (NO NORMALIZATION - already in meters)
+        logger.info(f"  RAW optimal_shifts (meters): {[f'{s:.2f}' for s in optimal_shifts]}")
 
         # Compute detailed metrics comparison
         self._log_metrics_comparison(
@@ -1401,8 +1622,8 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
         for i, opt_seg in zip(optimize_indices, optimized_segments):
             self.interpretation[i] = opt_seg
 
-        # Log
-        self._log_optimization_result('step', current_md * self.fixed_md_range + self.fixed_min_md,
+        # Log (NO NORMALIZATION - current_md already in meters)
+        self._log_optimization_result('step', current_md,
                                       best_fun, elapsed, wrapper, optimal_shifts, segments_to_optimize)
 
         # STEP 5: Save
@@ -1445,9 +1666,9 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
             detailed = wrapper.compute_detailed(shifts_tensor)
             angles_str = ",".join([f"{a:.2f}" for a in detailed.get('angles_deg', [])])
 
-        # Get MD range from segments
-        start_md = segments[0].start_md * self.fixed_md_range + self.fixed_min_md if segments else 0
-        end_md = segments[-1].end_md * self.fixed_md_range + self.fixed_min_md if segments else measured_depth
+        # Get MD range from segments (NO NORMALIZATION - already in meters)
+        start_md = segments[0].start_md if segments else 0
+        end_md = segments[-1].end_md if segments else measured_depth
 
         optimization_stats = {
             'method': f'EvoTorch_{self.algorithm}',
@@ -1499,9 +1720,9 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
             logger.debug("No reference interpretation for comparison")
             return
 
-        # Get segment start and end MDs in meters
-        first_start_md_m = segments[0].start_md * self.fixed_md_range + self.fixed_min_md
-        last_end_md_m = segments[-1].end_md * self.fixed_md_range + self.fixed_min_md
+        # Get segment start and end MDs (NO NORMALIZATION - already in meters)
+        first_start_md_m = segments[0].start_md
+        last_end_md_m = segments[-1].end_md
 
         # Compute detailed metrics for optimized
         opt_metrics = wrapper.compute_detailed(optimal_shifts)
@@ -1542,7 +1763,7 @@ class GpuAutoGeosteeringExecutor(BaseAutoGeosteeringExecutor):
                 wrapper.angle_sum_power,
                 self.tvd_to_typewell_shift,
                 prev_segment_angle=None,
-                reward_start_segment_idx=wrapper.reward_start_segment_idx
+                reward_start_segment_idx=0  # Ref segments don't have lever - always start from 0
             )
 
         # Log comparison
