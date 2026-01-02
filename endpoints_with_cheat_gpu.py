@@ -106,9 +106,16 @@ def optimize_endpoint_gpu(
     search_range: float = 10.0,
     n_steps: int = 41,
     window_length: float = 60.0,
+    parallel_shift: bool = False,
     device: str = 'cuda'
 ) -> tuple:
-    """Grid search using GPU projection with real segments."""
+    """
+    Grid search using GPU projection with real segments.
+
+    Args:
+        parallel_shift: If True, move both start and end shift together (like TVD - const).
+                       If False, only move end shift (interpolation within segment).
+    """
     mds = np.array(well_data.get('ref_segment_mds', []))
     shifts = np.array(well_data.get('ref_shifts', []))
 
@@ -117,7 +124,7 @@ def optimize_endpoint_gpu(
 
     end_md = float(mds[-1])
     start_md = end_md - window_length
-    shift_at_start = float(np.interp(start_md, mds, shifts))
+    ref_shift_at_start = float(np.interp(start_md, mds, shifts))
 
     # Prepare data for compute_gr_metrics
     well_data_for_metrics = prepare_well_data_for_metrics(well_data)
@@ -134,12 +141,22 @@ def optimize_endpoint_gpu(
     )
 
     for test_shift in shifts_to_test:
-        # Create segment with start_shift and end_shift
+        if parallel_shift:
+            # Move both ends together (parallel shift = TVD - const)
+            delta = test_shift - baseline_shift
+            start_shift = ref_shift_at_start + delta
+            end_shift = float(test_shift)
+        else:
+            # Only move end shift (interpolation)
+            start_shift = ref_shift_at_start
+            end_shift = float(test_shift)
+
+        # Create segment
         segment = {
             'startMd': start_md,
             'endMd': end_md,
-            'startShift': shift_at_start,
-            'endShift': float(test_shift),
+            'startShift': start_shift,
+            'endShift': end_shift,
         }
 
         # Compute GR metrics using real projection
@@ -158,10 +175,9 @@ def optimize_endpoint_gpu(
 
         pearson = metrics['pearson_raw']
 
-        # Compute angle penalty
-        shift_delta = test_shift - shift_at_start
-        angle_rad = np.arctan(shift_delta / window_length)
-        angle_deg = np.degrees(angle_rad)
+        # Angle penalty (same formula as baseline_with_objective.py)
+        shift_delta = test_shift - ref_shift_at_start
+        angle_deg = np.degrees(np.arctan(shift_delta / window_length))
         angle_penalty = (angle_deg - avg_angle) ** 2
 
         # Objective: correlation - angle_penalty * weight
@@ -176,8 +192,15 @@ def optimize_endpoint_gpu(
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--parallel', action='store_true',
+                       help='Parallel shift (move both ends together, like TVD-const)')
+    args = parser.parse_args()
+
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
+    print(f"Mode: {'PARALLEL shift (both ends)' if args.parallel else 'INTERPOLATION (only end shift)'}")
 
     dataset_path = '/mnt/e/Projects/Rogii/gpu_ag/dataset/gpu_ag_dataset.pt'
     print(f"Loading dataset from {dataset_path}")
@@ -208,6 +231,7 @@ def main():
             search_range=10.0,
             n_steps=41,
             window_length=60.0,
+            parallel_shift=args.parallel,
             device=device
         )
         optimized_error = optimized_shift - ref_shift_end
@@ -222,8 +246,9 @@ def main():
         print(f"{well_name}: baseline={baseline_error:+.2f}m, opt={optimized_error:+.2f}m")
 
     # Summary
+    mode_name = "parallel" if args.parallel else "interpolation"
     print("\n" + "="*60)
-    print("SUMMARY (GPU with real projection)")
+    print(f"SUMMARY (GPU {mode_name})")
     print("="*60)
 
     baseline_errors = [r['baseline_error'] for r in results]
@@ -233,7 +258,7 @@ def main():
     optimized_rmse = np.sqrt(np.mean(np.array(optimized_errors)**2))
 
     print(f"\nBaseline (TVT=const):  RMSE {baseline_rmse:.2f}m")
-    print(f"Optimized (GPU proj):  RMSE {optimized_rmse:.2f}m ({optimized_rmse - baseline_rmse:+.2f}m)")
+    print(f"Optimized ({mode_name}):  RMSE {optimized_rmse:.2f}m ({optimized_rmse - baseline_rmse:+.2f}m)")
 
     improved = sum(1 for b, o in zip(baseline_errors, optimized_errors) if abs(o) < abs(b))
     print(f"\nImproved: {improved}/{len(results)} wells")

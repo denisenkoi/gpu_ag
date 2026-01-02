@@ -334,6 +334,51 @@ def create_segments(well,
     return new_segments
 
 
+def create_segments_from_indices(well, segment_indices, start_shift=0.0):
+    """
+    Create segments from index tuples (from SmartSegmenter).
+
+    Args:
+        well: Well object (normalized)
+        segment_indices: List of (start_idx, end_idx) tuples
+        start_shift: Initial shift for first segment (segments are flat, shift mode)
+
+    Returns:
+        List[Segment]: List of segments ready for optimization
+    """
+    if not segment_indices:
+        return []
+
+    segments = []
+    current_shift = start_shift
+
+    for start_idx, end_idx in segment_indices:
+        # Validate indices
+        if start_idx >= end_idx:
+            logger.warning(f"Invalid segment indices: start={start_idx} >= end={end_idx}, skipping")
+            continue
+
+        if end_idx >= len(well.measured_depth):
+            end_idx = len(well.measured_depth) - 1
+            if start_idx >= end_idx:
+                continue
+
+        # Create segment with flat shift (angle=0, will be optimized)
+        segment = Segment(
+            well,
+            start_idx=start_idx,
+            start_shift=current_shift,
+            end_idx=end_idx,
+            end_shift=current_shift  # Flat segment, shifts will be optimized
+        )
+        segments.append(segment)
+
+        # Keep shifts continuous for next segment
+        current_shift = segment.end_shift
+
+    return segments
+
+
 def create_empty_interpretation(well,
                                 segment_len,
                                 segments_count,
