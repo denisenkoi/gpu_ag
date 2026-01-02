@@ -21,8 +21,35 @@ from torch_funcs.batch_objective import compute_detailed_metrics_torch
 from torch_funcs.projection import calc_horizontal_projection_batch_torch
 
 
+def compute_well_angle(well_data: dict, target_md: float, lookback: float = 100.0) -> float:
+    """
+    Compute angle from WELL TRAJECTORY (not interpretation).
+    Angle = arctan(delta_tvd / delta_md)
+    """
+    well_md = np.array(well_data.get('well_md', []))
+    well_tvd = np.array(well_data.get('well_tvd', []))
+
+    if len(well_md) < 2:
+        return 0.0
+
+    # Find indices for lookback window
+    end_idx = np.searchsorted(well_md, target_md)
+    start_idx = np.searchsorted(well_md, target_md - lookback)
+
+    if end_idx <= start_idx or end_idx >= len(well_md):
+        return 0.0
+
+    delta_tvd = well_tvd[end_idx] - well_tvd[start_idx]
+    delta_md = well_md[end_idx] - well_md[start_idx]
+
+    if delta_md <= 0:
+        return 0.0
+
+    return np.degrees(np.arctan(delta_tvd / delta_md))
+
+
 def compute_average_angle(well_data: dict) -> float:
-    """Compute average angle from reference segments."""
+    """Compute average angle from reference segments (PEEKING!)."""
     mds = well_data.get('ref_segment_mds', [])
     shifts = well_data.get('ref_shifts', [])
 
@@ -151,6 +178,8 @@ def optimize_endpoint_grid_search(
     """
     Grid search around baseline using GR correlation.
     Angle constraint: penalize deviations from avg_angle.
+
+    Uses shift_at_start from reference (known data).
     """
     mds = np.array(well_data.get('ref_segment_mds', []))
     shifts = np.array(well_data.get('ref_shifts', []))
@@ -161,7 +190,7 @@ def optimize_endpoint_grid_search(
     end_md = mds[-1]
     start_md = end_md - window_length
 
-    # Get shift at start of window (interpolate from reference)
+    # Get shift at start of window (known data)
     shift_at_start = np.interp(start_md, mds, shifts)
 
     best_objective = -float('inf')
@@ -222,8 +251,13 @@ def main():
         baseline_shift, tvt_at_max = compute_baseline_shift(well_data)
         baseline_error = baseline_shift - ref_shift_end
 
-        # Average angle
-        avg_angle = compute_average_angle(well_data)
+        # Well trajectory angle (HONEST - no peeking!)
+        end_md = mds[-1]
+        well_angle = compute_well_angle(well_data, end_md, lookback=100.0)
+
+        # For comparison: angle from reference (peeking)
+        ref_angle = compute_average_angle(well_data)
+        avg_angle = well_angle  # Use honest angle
 
         # Optimize with objective + angle constraint
         optimized_shift, best_obj = optimize_endpoint_grid_search(
