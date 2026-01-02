@@ -272,12 +272,19 @@ def calc_horizontal_projection_batch_torch(well_data, typewell_data, segments_ba
             tvt_actual_max = float('nan')
         logger.info(f"DEBUG TVT: batch[0] range=[{tvt_actual_min:.4f}, {tvt_actual_max:.4f}], typewell bounds=[{tvt_min.item():.4f}, {tvt_max.item():.4f}]")
 
-    out_of_bounds = torch.any(tvt_batch > tvt_max, dim=1) | torch.any(tvt_batch < tvt_min, dim=1)
-    success_mask = success_mask & ~out_of_bounds
+    # Clamp TVT to typewell bounds (like np.interp does extrapolation)
+    # but only allow small overshoot (max 1m = ~3ft) to avoid meaningless extrapolation
+    MAX_EXTRAPOLATION = 1.0  # meters (~3 ft)
+    overshoot_up = torch.clamp(tvt_batch - tvt_max, min=0).max(dim=1).values
+    overshoot_down = torch.clamp(tvt_min - tvt_batch, min=0).max(dim=1).values
+    max_overshoot = torch.maximum(overshoot_up, overshoot_down)
+    success_mask = success_mask & (max_overshoot <= MAX_EXTRAPOLATION)
+
+    tvt_batch = torch.clamp(tvt_batch, tvt_min, tvt_max)
 
     # Calculate synthetic curve for valid batches
     # For simplicity, calculate for all and mask later
-    valid_tvt_mask = ~torch.isnan(tvt_batch) & (tvt_batch >= tvt_min) & (tvt_batch <= tvt_max)
+    valid_tvt_mask = ~torch.isnan(tvt_batch)
 
     # Flatten for batch lookup
     tvt_flat = tvt_batch.flatten()
