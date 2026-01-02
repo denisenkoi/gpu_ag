@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-Endpoint prediction with cheat (GPU version).
+Endpoint prediction with cheat (GPU version) - USING REAL PROJECTION.
 
 Uses known shift_at_start from reference, brute force over endpoint shift.
-GPU Pearson correlation + angle penalty.
+Uses calc_horizontal_projection_batch_torch for proper segment interpolation.
 
-Result: RMSE 3.32m (vs baseline 6.18m), improved 47/100 wells
 Run: python endpoints_with_cheat_gpu.py
 """
 
-import os
 import sys
 import torch
 import numpy as np
@@ -17,122 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from torch_funcs.converters import GPU_DTYPE
-from torch_funcs.projection import calc_horizontal_projection_batch_torch
-from torch_funcs.correlations import pearson_batch_torch, mse_batch_torch
-
-
-def prepare_well_data_torch(well_data: dict, device: str = 'cuda'):
-    """Convert well data to torch tensors for GPU processing."""
-    well_md = np.array(well_data.get('well_md', []))
-    well_tvd = np.array(well_data.get('well_tvd', []))
-    log_md = np.array(well_data.get('log_md', []))
-    log_gr = np.array(well_data.get('log_gr', []))
-
-    # Interpolate TVD at log positions
-    log_tvd = np.interp(log_md, well_md, well_tvd)
-
-    return {
-        'md': torch.tensor(log_md, dtype=GPU_DTYPE, device=device),
-        'tvd': torch.tensor(log_tvd, dtype=GPU_DTYPE, device=device),
-        'value': torch.tensor(log_gr, dtype=GPU_DTYPE, device=device),
-    }
-
-
-def prepare_typewell_data_torch(well_data: dict, device: str = 'cuda'):
-    """Convert typewell data to torch tensors."""
-    type_tvd = np.array(well_data.get('type_tvd', []))
-    type_gr = np.array(well_data.get('type_gr', []))
-
-    return {
-        'tvd': torch.tensor(type_tvd, dtype=GPU_DTYPE, device=device),
-        'value': torch.tensor(type_gr, dtype=GPU_DTYPE, device=device),
-    }
-
-
-def create_single_segment_torch(
-    start_md: float,
-    end_md: float,
-    start_shift: float,
-    end_shift: float,
-    well_data: dict,
-    device: str = 'cuda'
-):
-    """
-    Create a single segment tensor.
-    Format: [start_idx, end_idx, start_vs, end_vs, start_shift, end_shift]
-    """
-    well_md = np.array(well_data.get('well_md', []))
-    well_tvd = np.array(well_data.get('well_tvd', []))
-
-    # Find indices
-    min_md = well_md.min()
-    md_step = (well_md.max() - min_md) / (len(well_md) - 1) if len(well_md) > 1 else 1.0
-
-    start_idx = int((start_md - min_md) / md_step)
-    end_idx = int((end_md - min_md) / md_step)
-
-    # Get VS (vertical section) = TVD at these points
-    start_vs = np.interp(start_md, well_md, well_tvd)
-    end_vs = np.interp(end_md, well_md, well_tvd)
-
-    segment = torch.tensor([
-        [start_idx, end_idx, start_vs, end_vs, start_shift, end_shift]
-    ], dtype=GPU_DTYPE, device=device)
-
-    return segment
-
-
-def compute_gr_correlation_gpu(
-    well_data_torch: dict,
-    typewell_data_torch: dict,
-    segment_torch: torch.Tensor,
-    device: str = 'cuda'
-) -> tuple:
-    """
-    Compute GR correlation using GPU projection.
-    Returns (pearson, mse).
-    """
-    # Simple shift-based projection (like baseline)
-    # For now, just use the end_shift as constant TVT offset
-    end_shift = segment_torch[0, 5].item()
-
-    well_tvd = well_data_torch['tvd']
-    well_gr = well_data_torch['value']
-    type_tvd = typewell_data_torch['tvd']
-    type_gr = typewell_data_torch['value']
-
-    # TVT = TVD - shift
-    tvt = well_tvd - end_shift
-
-    # Interpolate typewell GR at TVT positions
-    # Use simple torch interpolation
-    tvt_clamped = torch.clamp(tvt, type_tvd.min(), type_tvd.max())
-
-    # Find indices for interpolation
-    indices = torch.searchsorted(type_tvd, tvt_clamped)
-    indices = torch.clamp(indices, 1, len(type_tvd) - 1)
-
-    # Linear interpolation
-    x0 = type_tvd[indices - 1]
-    x1 = type_tvd[indices]
-    y0 = type_gr[indices - 1]
-    y1 = type_gr[indices]
-
-    t = (tvt_clamped - x0) / (x1 - x0 + 1e-8)
-    typewell_gr_interp = y0 + t * (y1 - y0)
-
-    # Compute Pearson and MSE
-    well_gr_norm = well_gr - well_gr.mean()
-    type_gr_norm = typewell_gr_interp - typewell_gr_interp.mean()
-
-    pearson = (well_gr_norm * type_gr_norm).sum() / (
-        torch.sqrt((well_gr_norm ** 2).sum() * (type_gr_norm ** 2).sum()) + 1e-8
-    )
-
-    mse = ((well_gr - typewell_gr_interp) ** 2).mean()
-
-    return pearson.item(), mse.item()
+from torch_funcs.gr_metrics import compute_gr_metrics
 
 
 def compute_well_angle(well_data: dict, target_md: float, lookback: float = 100.0) -> float:
@@ -184,10 +67,40 @@ def compute_baseline_shift(well_data: dict) -> tuple:
     return predicted_shift, tvt_at_max
 
 
+def prepare_well_data_for_metrics(well_data: dict) -> dict:
+    """Prepare well data dict for compute_gr_metrics."""
+    well_md = np.array(well_data.get('well_md', []))
+    well_tvd = np.array(well_data.get('well_tvd', []))
+    well_ns = np.array(well_data.get('well_ns', []))
+    well_ew = np.array(well_data.get('well_ew', []))
+    log_md = np.array(well_data.get('log_md', []))
+    log_gr = np.array(well_data.get('log_gr', []))
+
+    # Interpolate GR to well_md positions
+    gr_at_well_md = np.interp(well_md, log_md, log_gr)
+
+    return {
+        'md': well_md,
+        'tvd': well_tvd,
+        'ns': well_ns,
+        'ew': well_ew,
+        'value': gr_at_well_md,
+    }
+
+
+def prepare_typewell_data_for_metrics(well_data: dict) -> dict:
+    """Prepare typewell data dict for compute_gr_metrics."""
+    type_tvd = np.array(well_data.get('type_tvd', []))
+    type_gr = np.array(well_data.get('type_gr', []))
+
+    return {
+        'tvd': type_tvd,
+        'value': type_gr,
+    }
+
+
 def optimize_endpoint_gpu(
     well_data: dict,
-    well_data_torch: dict,
-    typewell_data_torch: dict,
     baseline_shift: float,
     avg_angle: float,
     search_range: float = 10.0,
@@ -195,19 +108,24 @@ def optimize_endpoint_gpu(
     window_length: float = 60.0,
     device: str = 'cuda'
 ) -> tuple:
-    """Grid search using GPU correlation."""
+    """Grid search using GPU projection with real segments."""
     mds = np.array(well_data.get('ref_segment_mds', []))
     shifts = np.array(well_data.get('ref_shifts', []))
 
     if len(mds) < 2:
         return baseline_shift, 0.0
 
-    end_md = mds[-1]
+    end_md = float(mds[-1])
     start_md = end_md - window_length
-    shift_at_start = np.interp(start_md, mds, shifts)
+    shift_at_start = float(np.interp(start_md, mds, shifts))
+
+    # Prepare data for compute_gr_metrics
+    well_data_for_metrics = prepare_well_data_for_metrics(well_data)
+    typewell_data = prepare_typewell_data_for_metrics(well_data)
 
     best_objective = -float('inf')
     best_shift = baseline_shift
+    best_pearson = 0.0
 
     shifts_to_test = np.linspace(
         baseline_shift - search_range,
@@ -216,20 +134,35 @@ def optimize_endpoint_gpu(
     )
 
     for test_shift in shifts_to_test:
-        # Compute angle
+        # Create segment with start_shift and end_shift
+        segment = {
+            'startMd': start_md,
+            'endMd': end_md,
+            'startShift': shift_at_start,
+            'endShift': float(test_shift),
+        }
+
+        # Compute GR metrics using real projection
+        metrics = compute_gr_metrics(
+            well_data=well_data_for_metrics,
+            typewell_data=typewell_data,
+            interpretation_segments=[segment],
+            md_start=start_md,
+            md_end=end_md,
+            tvd_to_typewell_shift=0.0,
+            device=device
+        )
+
+        if not metrics.get('success', False):
+            continue
+
+        pearson = metrics['pearson_raw']
+
+        # Compute angle penalty
         shift_delta = test_shift - shift_at_start
         angle_rad = np.arctan(shift_delta / window_length)
         angle_deg = np.degrees(angle_rad)
         angle_penalty = (angle_deg - avg_angle) ** 2
-
-        # Create segment and compute GPU correlation
-        segment = create_single_segment_torch(
-            start_md, end_md, shift_at_start, test_shift, well_data, device
-        )
-
-        pearson, mse = compute_gr_correlation_gpu(
-            well_data_torch, typewell_data_torch, segment, device
-        )
 
         # Objective: correlation - angle_penalty * weight
         objective = pearson - 0.01 * angle_penalty
@@ -237,6 +170,7 @@ def optimize_endpoint_gpu(
         if objective > best_objective:
             best_objective = objective
             best_shift = test_shift
+            best_pearson = pearson
 
     return best_shift, best_objective
 
@@ -266,15 +200,9 @@ def main():
         end_md = mds[-1]
         well_angle = compute_well_angle(well_data, end_md, lookback=100.0)
 
-        # Prepare GPU data
-        well_data_torch = prepare_well_data_torch(well_data, device)
-        typewell_data_torch = prepare_typewell_data_torch(well_data, device)
-
-        # GPU optimization
+        # GPU optimization with real projection
         optimized_shift, best_obj = optimize_endpoint_gpu(
             well_data=well_data,
-            well_data_torch=well_data_torch,
-            typewell_data_torch=typewell_data_torch,
             baseline_shift=baseline_shift,
             avg_angle=well_angle,
             search_range=10.0,
@@ -295,7 +223,7 @@ def main():
 
     # Summary
     print("\n" + "="*60)
-    print("SUMMARY (GPU)")
+    print("SUMMARY (GPU with real projection)")
     print("="*60)
 
     baseline_errors = [r['baseline_error'] for r in results]
@@ -305,7 +233,7 @@ def main():
     optimized_rmse = np.sqrt(np.mean(np.array(optimized_errors)**2))
 
     print(f"\nBaseline (TVT=const):  RMSE {baseline_rmse:.2f}m")
-    print(f"Optimized (GPU corr):  RMSE {optimized_rmse:.2f}m ({optimized_rmse - baseline_rmse:+.2f}m)")
+    print(f"Optimized (GPU proj):  RMSE {optimized_rmse:.2f}m ({optimized_rmse - baseline_rmse:+.2f}m)")
 
     improved = sum(1 for b, o in zip(baseline_errors, optimized_errors) if abs(o) < abs(b))
     print(f"\nImproved: {improved}/{len(results)} wells")
