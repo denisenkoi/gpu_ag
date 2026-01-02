@@ -111,11 +111,12 @@ def optimize_endpoint_gpu(
 ) -> tuple:
     """
     Grid search using GPU projection with real segments.
-
-    Args:
-        parallel_shift: If True, move both start and end shift together (like TVD - const).
-                       If False, only move end shift (interpolation within segment).
+    BATCHED version - all shifts evaluated in single GPU call.
     """
+    from torch_funcs.projection import calc_horizontal_projection_batch_torch
+    from torch_funcs.correlations import pearson_batch_torch
+    from torch_funcs.converters import GPU_DTYPE
+
     mds = np.array(well_data.get('ref_segment_mds', []))
     shifts = np.array(well_data.get('ref_shifts', []))
 
@@ -126,67 +127,115 @@ def optimize_endpoint_gpu(
     start_md = end_md - window_length
     ref_shift_at_start = float(np.interp(start_md, mds, shifts))
 
-    # Prepare data for compute_gr_metrics
-    well_data_for_metrics = prepare_well_data_for_metrics(well_data)
-    typewell_data = prepare_typewell_data_for_metrics(well_data)
+    # Prepare well data
+    well_md = np.array(well_data.get('well_md', []))
+    well_tvd = np.array(well_data.get('well_tvd', []))
+    well_ns = np.array(well_data.get('well_ns', []))
+    well_ew = np.array(well_data.get('well_ew', []))
+    log_md = np.array(well_data.get('log_md', []))
+    log_gr = np.array(well_data.get('log_gr', []))
+    type_tvd = np.array(well_data.get('type_tvd', []))
+    type_gr = np.array(well_data.get('type_gr', []))
 
-    best_objective = -float('inf')
-    best_shift = baseline_shift
-    best_pearson = 0.0
+    # Calculate VS
+    well_vs = np.zeros(len(well_ns))
+    for i in range(1, len(well_ns)):
+        well_vs[i] = well_vs[i-1] + np.sqrt((well_ns[i] - well_ns[i-1])**2 + (well_ew[i] - well_ew[i-1])**2)
 
+    # Interpolate GR to well_md
+    gr_at_well_md = np.interp(well_md, log_md, log_gr)
+
+    # Find indices for segment
+    start_idx = int(np.searchsorted(well_md, start_md))
+    end_idx = int(np.searchsorted(well_md, end_md))
+    start_idx = min(start_idx, len(well_md) - 1)
+    end_idx = min(end_idx, len(well_md) - 1)
+
+    if start_idx >= end_idx:
+        return baseline_shift, 0.0
+
+    start_vs = well_vs[start_idx]
+    end_vs = well_vs[end_idx]
+
+    # Generate all test shifts
     shifts_to_test = np.linspace(
         baseline_shift - search_range,
         baseline_shift + search_range,
         n_steps
     )
 
+    # Build batch of segments: (n_steps, 1, 6)
+    # Format: [start_idx, end_idx, start_vs, end_vs, start_shift, end_shift]
+    segments_list = []
     for test_shift in shifts_to_test:
         if parallel_shift:
-            # Move both ends together (parallel shift = TVD - const)
             delta = test_shift - baseline_shift
-            start_shift = ref_shift_at_start + delta
-            end_shift = float(test_shift)
+            seg_start_shift = ref_shift_at_start + delta
+            seg_end_shift = float(test_shift)
         else:
-            # Only move end shift (interpolation)
-            start_shift = ref_shift_at_start
-            end_shift = float(test_shift)
+            seg_start_shift = ref_shift_at_start
+            seg_end_shift = float(test_shift)
 
-        # Create segment
-        segment = {
-            'startMd': start_md,
-            'endMd': end_md,
-            'startShift': start_shift,
-            'endShift': end_shift,
-        }
+        segments_list.append([start_idx, end_idx, start_vs, end_vs, seg_start_shift, seg_end_shift])
 
-        # Compute GR metrics using real projection
-        metrics = compute_gr_metrics(
-            well_data=well_data_for_metrics,
-            typewell_data=typewell_data,
-            interpretation_segments=[segment],
-            md_start=start_md,
-            md_end=end_md,
-            tvd_to_typewell_shift=0.0,
-            device=device
-        )
+    segments_np = np.array(segments_list, dtype=np.float32).reshape(n_steps, 1, 6)
+    segments_torch = torch.tensor(segments_np, dtype=GPU_DTYPE, device=device)
 
-        if not metrics.get('success', False):
-            continue
+    # Prepare torch data
+    tw_step = float(type_tvd[1] - type_tvd[0])
+    min_depth = float(type_tvd.min())
 
-        pearson = metrics['pearson_raw']
+    well_torch = {
+        'md': torch.tensor(well_md, dtype=GPU_DTYPE, device=device),
+        'vs': torch.tensor(well_vs, dtype=GPU_DTYPE, device=device),
+        'tvd': torch.tensor(well_tvd, dtype=GPU_DTYPE, device=device),
+        'value': torch.tensor(gr_at_well_md, dtype=GPU_DTYPE, device=device),
+        'normalized': False,
+    }
+    typewell_torch = {
+        'tvd': torch.tensor(type_tvd, dtype=GPU_DTYPE, device=device),
+        'value': torch.tensor(type_gr, dtype=GPU_DTYPE, device=device),
+        'min_depth': min_depth,
+        'typewell_step': tw_step,
+        'normalized': False,
+    }
 
-        # Angle penalty (same formula as baseline_with_objective.py)
-        shift_delta = test_shift - ref_shift_at_start
-        angle_deg = np.degrees(np.arctan(shift_delta / window_length))
-        angle_penalty = (angle_deg - avg_angle) ** 2
+    # Single batched projection call!
+    success_mask, tvt_batch, synt_batch, first_idx = calc_horizontal_projection_batch_torch(
+        well_torch, typewell_torch, segments_torch, tvd_to_typewell_shift=0.0
+    )
 
-        # Objective: correlation - angle_penalty * weight
-        objective = pearson - 0.01 * angle_penalty
+    # Get well GR for range
+    n_points = end_idx - start_idx + 1
+    well_gr_range = torch.tensor(
+        gr_at_well_md[start_idx:end_idx + 1], dtype=GPU_DTYPE, device=device
+    ).unsqueeze(0).expand(n_steps, -1)  # (n_steps, n_points)
 
-        if objective > best_objective:
-            best_objective = objective
-            best_shift = test_shift
-            best_pearson = pearson
+    synt_range = synt_batch[:, :n_points]  # (n_steps, n_points)
+
+    # Compute pearson for all batches
+    pearsons = pearson_batch_torch(well_gr_range, synt_range)  # (n_steps,)
+
+    # Set failed batches to -inf
+    pearsons = torch.where(success_mask, pearsons, torch.tensor(-float('inf'), device=device))
+
+    # Compute angle penalties (vectorized)
+    shifts_t = torch.tensor(shifts_to_test, dtype=GPU_DTYPE, device=device)
+    shift_deltas = shifts_t - ref_shift_at_start
+    angle_degs = torch.rad2deg(torch.atan(shift_deltas / window_length))
+    angle_penalties = (angle_degs - avg_angle) ** 2
+
+    # Compute objectives
+    objectives = pearsons - 0.01 * angle_penalties
+
+    # If all failed, return baseline
+    if not success_mask.any():
+        return baseline_shift, -float('inf')
+
+    # Find best among successful
+    best_idx = torch.argmax(objectives).item()
+    best_shift = shifts_to_test[best_idx]
+    best_objective = objectives[best_idx].item()
 
     return best_shift, best_objective
 
