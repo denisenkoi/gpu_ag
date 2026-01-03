@@ -340,8 +340,8 @@ class RegionFinder:
                 detector_name=self.detector.name
             )
 
-        # Find region with maximum density of significant peaks
-        # Slide window and count significant peaks
+        # Find region with maximum prominence sum
+        # Slide window and sum prominence of significant peaks/valleys
         md_step = np.median(np.diff(md))
         window_size_idx = int(region_length_m / md_step)
 
@@ -349,20 +349,20 @@ class RegionFinder:
         best_center_idx = search_start_idx
 
         sig_peak_indices = np.array([p.index for p in significant_peaks])
+        sig_peak_prominences = np.array([p.prominence for p in significant_peaks])
 
         for center_idx in range(search_start_idx + window_size_idx // 2,
                                 search_end_idx - window_size_idx // 2):
-            # Count significant peaks in window
+            # Sum prominence of significant peaks in window
             window_start = center_idx - window_size_idx // 2
             window_end = center_idx + window_size_idx // 2
 
-            peaks_in_window = np.sum(
-                (sig_peak_indices >= window_start) & (sig_peak_indices < window_end)
-            )
+            in_window_mask = (sig_peak_indices >= window_start) & (sig_peak_indices < window_end)
+            prominence_sum = np.sum(sig_peak_prominences[in_window_mask])
 
-            # Score: number of peaks + bonus for being closer to end
+            # Score: sum of prominence + small bonus for being closer to end
             position_bonus = (center_idx - search_start_idx) / (search_end_idx - search_start_idx)
-            score = peaks_in_window + 0.5 * position_bonus
+            score = prominence_sum + 0.5 * position_bonus
 
             if score > best_score:
                 best_score = score

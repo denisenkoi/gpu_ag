@@ -143,16 +143,19 @@ def interpolate_shift_at_md(data: Dict[str, Any], target_md: float) -> float:
     if target_md < ref_mds[0]:
         return float(ref_start_shifts[0])
 
+    # Get lateral_well_last_md for last segment end
+    lateral_last_md = float(data.get('lateral_well_last_md', ref_mds[-1] + 1000))
+
     # Find segment containing target_md
     for i in range(len(ref_mds)):
         seg_start = ref_mds[i]
-        seg_end = ref_mds[i + 1] if i + 1 < len(ref_mds) else float('inf')
+        seg_end = ref_mds[i + 1] if i + 1 < len(ref_mds) else lateral_last_md
 
         if seg_start <= target_md <= seg_end:
             start_shift = ref_start_shifts[i]
             end_shift = ref_end_shifts[i]
 
-            if seg_end > seg_start and seg_end != float('inf'):
+            if seg_end > seg_start:
                 ratio = (target_md - seg_start) / (seg_end - seg_start)
                 return float(start_shift + ratio * (end_shift - start_shift))
             return float(start_shift)
