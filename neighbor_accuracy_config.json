@@ -3,63 +3,119 @@
   "dataset": "gpu_ag_dataset.pt",
   "wells_count": 100,
   "points_analyzed": 17910,
-  "date_generated": "2025-01-03",
-
+  "date_generated": "2026-01-03",
   "coverage": {
     "both_L_R": 0.985,
     "left_only": 0.014,
     "right_only": 0.002,
     "none": 0.0
   },
-
   "recommended_settings": {
     "delta_ft": 100,
     "azimuth_threshold_deg": 15,
     "include_opposite": true,
     "tvd_weight": 2.0
   },
-
   "accuracy_matrix": {
-    "description": "Expected |error| percentiles for neighbor dip prediction",
-    "units": "degrees",
-
     "L+R_weighted": {
-      "description": "Weighted average of L and R neighbors (1/distance weights)",
       "by_distance_ft": {
-        "0-100": {"n": 869, "p50": 0.20, "p90": 0.55, "p95": 0.70},
-        "100-200": {"n": 3407, "p50": 0.25, "p90": 0.67, "p95": 0.85},
-        "200-500": {"n": 1417, "p50": 0.27, "p90": 0.86, "p95": 1.15},
-        "500-1000": {"n": 2766, "p50": 0.29, "p90": 0.83, "p95": 1.02},
-        "1000+": {"n": 9175, "p50": 0.37, "p90": 1.11, "p95": 1.33}
+        "0-100": {
+          "n": 869,
+          "p50": 0.18,
+          "p90": 0.64,
+          "p95": 0.83
+        },
+        "100-200": {
+          "n": 3407,
+          "p50": 0.25,
+          "p90": 0.67,
+          "p95": 0.85
+        },
+        "200-500": {
+          "n": 1417,
+          "p50": 0.27,
+          "p90": 0.86,
+          "p95": 1.15
+        },
+        "500-1000": {
+          "n": 2766,
+          "p50": 0.29,
+          "p90": 0.83,
+          "p95": 1.02
+        },
+        "1000-inf": {
+          "n": 9175,
+          "p50": 0.37,
+          "p90": 1.11,
+          "p95": 1.33
+        }
       },
-      "all": {"n": 17634, "p50": 0.30, "p90": 0.90, "p95": 1.10}
+      "all": {
+        "n": 17634,
+        "p50": 0.31,
+        "p90": 0.94,
+        "p95": 1.19
+      }
     },
-
     "L_only": {
-      "description": "Only left neighbor available",
       "by_distance_ft": {
-        "100-200": {"n": 229, "p50": 0.50, "p90": 0.95, "p95": 1.08}
+        "0-100": {
+          "n": 18,
+          "p50": 1.1,
+          "p90": 1.18,
+          "p95": 1.18
+        },
+        "100-200": {
+          "n": 229,
+          "p50": 0.5,
+          "p90": 0.95,
+          "p95": 1.08
+        }
       },
-      "all": {"n": 247, "p50": 0.52, "p90": 1.04, "p95": 1.15}
+      "all": {
+        "n": 247,
+        "p50": 0.52,
+        "p90": 1.04,
+        "p95": 1.15
+      }
     },
-
     "R_only": {
-      "description": "Only right neighbor available",
-      "all": {"n": 29, "p50": 0.20, "p90": 1.17, "p95": 1.27}
+      "by_distance_ft": {
+        "1000-inf": {
+          "n": 29,
+          "p50": 0.2,
+          "p90": 1.17,
+          "p95": 1.27
+        }
+      },
+      "all": {
+        "n": 29,
+        "p50": 0.2,
+        "p90": 1.17,
+        "p95": 1.27
+      }
     }
   },
-
   "delta_comparison": {
-    "description": "How averaging window affects accuracy (L+R weighted, all distances)",
-    "0": {"p50": 0.45, "p90": 1.40, "p95": 1.90, "note": "point angle"},
-    "50": {"p50": 0.35, "p90": 1.05, "p95": 1.35},
-    "100": {"p50": 0.30, "p90": 0.90, "p95": 1.10, "note": "recommended"},
-    "200": {"p50": 0.23, "p90": 0.68, "p95": 0.88}
-  },
-
-  "usage": {
-    "formula": "weighted_dip = (dip_L/dist_L + dip_R/dist_R) / (1/dist_L + 1/dist_R)",
-    "expected_error_p90": "lookup in accuracy_matrix by neighbor config and max(dist_L, dist_R)",
-    "confidence": "90% of predictions within p90 error"
+    "0": {
+      "p50": 0.56,
+      "p90": 1.79,
+      "p95": 2.45
+    },
+    "100": {
+      "p50": 0.31,
+      "p90": 0.95,
+      "p95": 1.19
+    },
+    "200": {
+      "p50": 0.23,
+      "p90": 0.68,
+      "p95": 0.87
+    },
+    "300": {
+      "p50": 0.19,
+      "p90": 0.57,
+      "p95": 0.72
+    }
   }
 }
