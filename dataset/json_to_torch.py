@@ -277,6 +277,11 @@ def process_single_json(json_path: Path, device: str = 'cpu',
         # Get tvdTypewellShift
         tvd_typewell_shift = json_data.get('tvdTypewellShift', 0.0)
 
+        # Get xySurface (wellhead absolute coordinates)
+        xy_surface = json_data.get('well', {}).get('xySurface', {})
+        x_surface = xy_surface.get('xSurface', 0.0)
+        y_surface = xy_surface.get('ySurface', 0.0)
+
         # Convert to torch tensors
         result = {
             # RAW well trajectory data (from well.points)
@@ -307,6 +312,10 @@ def process_single_json(json_path: Path, device: str = 'cpu',
             'is_log_normalization_enabled': is_log_normalization_enabled,
             'tvd_typewell_shift': tvd_typewell_shift,
             'norm_multiplier': norm_multiplier,
+
+            # Wellhead absolute coordinates (for neighbor search)
+            'x_surface': x_surface,
+            'y_surface': y_surface,
         }
 
         # Add landing and normalization if calculated
