@@ -23,8 +23,9 @@ Output format:
             'typewell_tvd': tensor, # (M,) stitched pseudo+type TVD
             'typewell_gr': tensor,  # (M,) stitched pseudo+type GR (normalized with 1/multiplier)
 
-            'ref_shifts': tensor,   # (K,) reference interpretation end_shifts
             'ref_segment_mds': tensor,  # (K,) segment start MDs
+            'ref_start_shifts': tensor, # (K,) segment start shifts
+            'ref_shifts': tensor,       # (K,) segment end shifts
             'norm_multiplier': float,   # normalization multiplier
             'perch_md': float,          # landing end point
         },
@@ -168,18 +169,19 @@ def extract_ref_shifts(json_data: dict) -> tuple:
     Extract reference interpretation shifts from starredInterpretation.
 
     Returns:
-        (start_mds, end_shifts) - arrays of segment start MDs and end shifts
+        (start_mds, start_shifts, end_shifts) - arrays of segment start MDs, start shifts and end shifts
     """
     starred = json_data.get('starredInterpretation', {})
     segments = starred.get('segments', [])
 
     if not segments:
-        return np.array([]), np.array([])
+        return np.array([]), np.array([]), np.array([])
 
     start_mds = np.array([s['startMd'] for s in segments], dtype=np.float64)
+    start_shifts = np.array([s['startShift'] for s in segments], dtype=np.float64)
     end_shifts = np.array([s['endShift'] for s in segments], dtype=np.float64)
 
-    return start_mds, end_shifts
+    return start_mds, start_shifts, end_shifts
 
 
 def extract_trajectory(json_data: dict) -> tuple:
@@ -261,7 +263,7 @@ def process_single_json(json_path: Path, device: str = 'cpu',
                 type_gr = np.array([p[1] for p in valid_type], dtype=np.float64)
 
         # Extract reference interpretation
-        ref_mds, ref_shifts = extract_ref_shifts(json_data)
+        ref_mds, ref_start_shifts, ref_shifts = extract_ref_shifts(json_data)
 
         # Extract trajectory for future analysis
         traj_md, traj_ns, traj_ew = extract_trajectory(json_data)
@@ -304,6 +306,7 @@ def process_single_json(json_path: Path, device: str = 'cpu',
 
             # Reference interpretation
             'ref_segment_mds': torch.tensor(ref_mds, dtype=torch.float64, device=device),
+            'ref_start_shifts': torch.tensor(ref_start_shifts, dtype=torch.float64, device=device),
             'ref_shifts': torch.tensor(ref_shifts, dtype=torch.float64, device=device),
 
             # Metadata

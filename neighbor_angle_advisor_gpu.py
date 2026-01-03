@@ -50,6 +50,7 @@ class NeighborAngleAdvisorGPU:
     def _get_dip_angle_at_md(self, data: dict, md: float) -> Optional[float]:
         """Get dip angle from reference interpretation at given MD."""
         ref_mds = data['ref_segment_mds'].numpy()
+        ref_start_shifts = data['ref_start_shifts'].numpy()
         ref_shifts = data['ref_shifts'].numpy()
 
         if len(ref_mds) == 0:
@@ -60,7 +61,7 @@ class NeighborAngleAdvisorGPU:
             end_md = ref_mds[i + 1] if i + 1 < len(ref_mds) else data['lateral_well_last_md']
 
             if start_md <= md <= end_md:
-                start_shift = 0.0 if i == 0 else ref_shifts[i - 1]
+                start_shift = ref_start_shifts[i]
                 end_shift = ref_shifts[i]
                 dmd = end_md - start_md
                 dshift = end_shift - start_shift

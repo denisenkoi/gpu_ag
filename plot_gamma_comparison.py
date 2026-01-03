@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Plot well gamma vs projected gamma (synt_curve) for visual correlation check.
-Uses numpy_funcs/projection.py directly.
+Supports both numpy and torch projection for comparison.
 """
 
 import sys
@@ -18,6 +18,13 @@ sys.path.insert(0, str(Path(__file__).parent / "cpu_baseline"))
 
 from cpu_baseline.typewell_provider import extend_pseudo_with_typelog
 from numpy_funcs.projection import calc_horizontal_projection_numpy
+from numpy_funcs.interpretation import (
+    build_segments_from_dataset,
+    segments_to_numpy_array,
+    calc_vs_from_trajectory
+)
+from torch_funcs.projection import calc_horizontal_projection_batch_torch
+from torch_funcs.converters import numpy_to_torch, segments_numpy_to_torch
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -29,16 +36,6 @@ def load_dataset():
     """Load full dataset."""
     dataset_path = Path(__file__).parent / "dataset" / "gpu_ag_dataset.pt"
     return torch.load(dataset_path, map_location='cpu', weights_only=False)
-
-
-def calc_vs_from_trajectory(ns, ew):
-    """Calculate VS (cumulative horizontal distance) from NS/EW."""
-    vs = np.zeros(len(ns))
-    for i in range(1, len(ns)):
-        dx = ns[i] - ns[i-1]
-        dy = ew[i] - ew[i-1]
-        vs[i] = vs[i-1] + np.sqrt(dx*dx + dy*dy)
-    return vs
 
 
 def stitch_typewell(data, mode='OLD'):
@@ -79,56 +76,14 @@ def stitch_typewell(data, mode='OLD'):
     return tw_tvd, tw_gr
 
 
-def build_segments_numpy(ref_mds, ref_shifts, well_md, well_vs):
-    """
-    Build segments_data numpy array.
-    Format: (K, 6) - [start_idx, end_idx, start_vs, end_vs, start_shift, end_shift]
-
-    ref_mds[i] = end MD of segment i
-    ref_shifts[i] = end shift of segment i
-    """
-    segments = []
-
-    for i in range(len(ref_mds) - 1):
-        start_md = ref_mds[i]
-        end_md = ref_mds[i + 1]
-
-        # Skip zero-length segments
-        if abs(end_md - start_md) < 0.01:
-            continue
-
-        # startShift = previous segment's end shift (or 0 for first)
-        start_shift = ref_shifts[i - 1] if i > 0 else 0.0
-        # endShift = this segment's end shift
-        end_shift = ref_shifts[i]
-
-        # Find indices
-        start_idx = np.searchsorted(well_md, start_md)
-        end_idx = np.searchsorted(well_md, end_md)
-
-        if start_idx >= len(well_md):
-            start_idx = len(well_md) - 1
-        if end_idx >= len(well_md):
-            end_idx = len(well_md) - 1
-
-        # Skip if same index (zero VS delta)
-        if start_idx == end_idx:
-            continue
-
-        start_vs = well_vs[start_idx]
-        end_vs = well_vs[end_idx]
-
-        segments.append([start_idx, end_idx, start_vs, end_vs, start_shift, end_shift])
-
-    return np.array(segments, dtype=np.float64)
-
-
 def main():
     # === HARDCODED CONFIG ===
     WELL_NAME = "Well162~EGFDL"
-    MD_START_FT = 19600  # None for full well
-    MD_END_FT = 20000    # None for full well
-    MODE = 'ORIGINAL'    # ТОЛЬКО ORIGINAL!
+    WELL_NAME = "Well1221~EGFDL"
+    MD_START_FT = 20347  # None for full well
+    MD_END_FT = 21000    # None for full well
+    MODE = 'ORIGINAL'    # ORIGINAL = raw typewell without normalization
+    PROJECTION = 'numpy' # 'numpy' or 'torch'
     # ========================
 
     logger.info(f"Loading well: {WELL_NAME}")
@@ -153,10 +108,6 @@ def main():
     # Interpolate log to well trajectory grid
     well_gr = np.interp(well_md, log_md, log_gr)
 
-    # Reference interpretation
-    ref_mds = data['ref_segment_mds'].cpu().numpy()
-    ref_shifts = data['ref_shifts'].cpu().numpy()
-
     # TVD shift from dataset (critical for projection!)
     tvd_typewell_shift = data.get('tvd_typewell_shift', 0.0)
     if isinstance(tvd_typewell_shift, torch.Tensor):
@@ -164,7 +115,18 @@ def main():
     logger.info(f"tvd_typewell_shift: {tvd_typewell_shift:.4f}m")
 
     logger.info(f"Well MD: {well_md.min():.1f}-{well_md.max():.1f}m, points={len(well_md)}")
-    logger.info(f"Reference: {len(ref_mds)} points, MD {ref_mds[0]:.1f}-{ref_mds[-1]:.1f}m")
+
+    # Build segments using interpretation module
+    segments_list = build_segments_from_dataset(data, well_md)
+    logger.info(f"Reference segments: {len(segments_list)}")
+    if segments_list:
+        logger.info(f"  First: MD {segments_list[0]['startMd']:.1f}-{segments_list[0]['endMd']:.1f}m")
+        logger.info(f"  Last: MD {segments_list[-1]['startMd']:.1f}-{segments_list[-1]['endMd']:.1f}m, "
+                   f"shift {segments_list[-1]['startShift']:.2f}->{segments_list[-1]['endShift']:.2f}m")
+
+    # Convert to numpy array for projection
+    segments_data = segments_to_numpy_array(segments_list, well_md, well_vs)
+    logger.info(f"Segments for projection: {len(segments_data)}")
 
     # Build typewell
     tw_tvd, tw_gr = stitch_typewell(data, mode=MODE)
@@ -190,17 +152,51 @@ def main():
         'normalized': False,
     }
 
-    # Build segments
-    segments_data = build_segments_numpy(ref_mds, ref_shifts, well_md, well_vs)
-    logger.info(f"Segments: {len(segments_data)}")
-
     # Calculate projection
-    success, well_data = calc_horizontal_projection_numpy(
-        well_data, typewell_data, segments_data, tvd_to_typewell_shift=tvd_typewell_shift
-    )
-    logger.info(f"Projection success: {success}")
+    logger.info(f"Projection mode: {PROJECTION}")
 
-    synt_curve = well_data['synt_curve']
+    if PROJECTION == 'numpy':
+        success, well_data = calc_horizontal_projection_numpy(
+            well_data, typewell_data, segments_data, tvd_to_typewell_shift=tvd_typewell_shift
+        )
+        logger.info(f"Numpy projection success: {success}")
+        synt_curve = well_data['synt_curve']
+
+    else:  # torch
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        logger.info(f"Torch device: {device}")
+
+        # Convert to torch
+        well_torch = numpy_to_torch(well_data, device=device)
+        typewell_torch = numpy_to_torch(typewell_data, device=device)
+        segments_torch = segments_numpy_to_torch(segments_data, device=device)
+
+        # Add batch dimension
+        segments_batch = segments_torch.unsqueeze(0)  # (1, K, 6)
+
+        success_mask, tvt_batch, synt_batch, first_idx = calc_horizontal_projection_batch_torch(
+            well_torch, typewell_torch, segments_batch, tvd_to_typewell_shift=tvd_typewell_shift
+        )
+
+        success = bool(success_mask[0].item()) if success_mask is not None else False
+        logger.info(f"Torch projection success: {success}")
+
+        # Extract synt_curve
+        synt_curve = np.full_like(well_md, np.nan)
+        if success and synt_batch is not None:
+            synt_np = synt_batch[0].cpu().numpy()
+            # first_idx can be int or tensor
+            if first_idx is not None:
+                if hasattr(first_idx, '__getitem__'):
+                    first_start_idx = int(first_idx[0].item() if hasattr(first_idx[0], 'item') else first_idx[0])
+                else:
+                    first_start_idx = int(first_idx)
+            else:
+                first_start_idx = 0
+            end_idx = first_start_idx + len(synt_np)
+            if end_idx <= len(synt_curve):
+                synt_curve[first_start_idx:end_idx] = synt_np
+
     valid_mask = ~np.isnan(synt_curve)
     logger.info(f"Valid synt_curve: {valid_mask.sum()} / {len(synt_curve)}")
 

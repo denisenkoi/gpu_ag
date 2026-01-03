@@ -233,9 +233,16 @@ def slice_data_to_md(data: Dict[str, Any], current_md: float) -> Dict[str, Any]:
 
 
 def build_ref_segments(data: Dict[str, Any]) -> List[Dict]:
-    """Build reference segments from dataset tensors"""
+    """Build reference segments from dataset tensors.
+
+    Dataset format:
+        ref_segment_mds[i] = startMd of segment i
+        ref_start_shifts[i] = startShift of segment i
+        ref_shifts[i] = endShift of segment i
+    """
     ref_mds = data['ref_segment_mds'].cpu().numpy()
-    ref_shifts = data['ref_shifts'].cpu().numpy()
+    ref_start_shifts = data['ref_start_shifts'].cpu().numpy()
+    ref_end_shifts = data['ref_shifts'].cpu().numpy()
 
     if len(ref_mds) == 0:
         return []
@@ -244,10 +251,10 @@ def build_ref_segments(data: Dict[str, Any]) -> List[Dict]:
     for i in range(len(ref_mds)):
         seg = {
             'startMd': float(ref_mds[i]),
-            'startShift': float(ref_shifts[i - 1]) if i > 0 else 0.0,
-            'endShift': float(ref_shifts[i])
+            'startShift': float(ref_start_shifts[i]),
+            'endShift': float(ref_end_shifts[i])
         }
-        # Add endMd from next segment or estimate
+        # Add endMd from next segment's startMd
         if i + 1 < len(ref_mds):
             seg['endMd'] = float(ref_mds[i + 1])
         segments.append(seg)
@@ -257,38 +264,39 @@ def build_ref_segments(data: Dict[str, Any]) -> List[Dict]:
 
 def build_manual_interpretation_to_md(data: Dict[str, Any], target_md: float) -> List[Dict]:
     """
-    Build manual interpretation segments from ref_shifts up to target_md.
+    Build manual interpretation segments from dataset up to target_md.
 
-    ref_segment_mds[i] and ref_shifts[i] are the END point of segment i.
+    Dataset format:
+        ref_segment_mds[i] = startMd of segment i
+        ref_start_shifts[i] = startShift of segment i
+        ref_shifts[i] = endShift of segment i
+        endMd of segment i = ref_mds[i+1] (or target_md for last)
 
     Args:
-        data: Well data with ref_segment_mds and ref_shifts
+        data: Well data with ref_segment_mds, ref_start_shifts, ref_shifts
         target_md: MD to build interpretation up to
 
     Returns:
         List of segment dicts suitable for gpu_executor
     """
     ref_mds = data['ref_segment_mds'].cpu().numpy()
-    ref_shifts = data['ref_shifts'].cpu().numpy()
+    ref_start_shifts = data['ref_start_shifts'].cpu().numpy()
+    ref_end_shifts = data['ref_shifts'].cpu().numpy()
 
     if len(ref_mds) == 0:
         return []
 
-    # Get start_md for first segment (from data or first ref point)
-    first_seg_start = data.get('start_md', ref_mds[0] - 100)
-
     segments = []
     for i in range(len(ref_mds)):
-        # Segment i: starts at previous end, ends at ref_mds[i]
-        if i == 0:
-            seg_start_md = float(first_seg_start)
-            start_shift = 0.0
-        else:
-            seg_start_md = float(ref_mds[i - 1])
-            start_shift = float(ref_shifts[i - 1])
+        seg_start_md = float(ref_mds[i])
+        start_shift = float(ref_start_shifts[i])
+        end_shift = float(ref_end_shifts[i])
 
-        seg_end_md = float(ref_mds[i])
-        end_shift = float(ref_shifts[i])
+        # endMd is next segment's startMd, or target_md for last
+        if i + 1 < len(ref_mds):
+            seg_end_md = float(ref_mds[i + 1])
+        else:
+            seg_end_md = target_md
 
         # Stop if segment starts after target_md
         if seg_start_md >= target_md:
@@ -318,42 +326,47 @@ def build_manual_interpretation_to_md(data: Dict[str, Any], target_md: float) ->
 
 def interpolate_shift_at_md(data: Dict[str, Any], target_md: float) -> float:
     """
-    Interpolate shift from ref_shifts at given MD.
+    Interpolate shift at given MD.
+
+    Dataset format:
+        ref_segment_mds[i] = startMd of segment i
+        ref_start_shifts[i] = shift at startMd (ref_mds[i])
+        ref_shifts[i] = shift at endMd (ref_mds[i+1])
 
     Args:
-        data: Well data with ref_segment_mds and ref_shifts
+        data: Well data with ref_segment_mds, ref_start_shifts, ref_shifts
         target_md: MD to interpolate shift at
 
     Returns:
         Interpolated shift value (meters)
     """
     ref_mds = data['ref_segment_mds'].cpu().numpy()
-    ref_shifts = data['ref_shifts'].cpu().numpy()
+    ref_start_shifts = data['ref_start_shifts'].cpu().numpy()
+    ref_end_shifts = data['ref_shifts'].cpu().numpy()
 
     if len(ref_mds) == 0:
         return 0.0
 
+    # target_md before first segment
+    if target_md < ref_mds[0]:
+        return float(ref_start_shifts[0])
+
     # Find segment containing target_md
     for i in range(len(ref_mds)):
         seg_start = ref_mds[i]
-        seg_end = ref_mds[i + 1] if i + 1 < len(ref_mds) else seg_start + 1000
+        seg_end = ref_mds[i + 1] if i + 1 < len(ref_mds) else float('inf')
 
         if seg_start <= target_md <= seg_end:
-            # Interpolate within segment
-            start_shift = ref_shifts[i - 1] if i > 0 else 0.0
-            end_shift = ref_shifts[i]
+            start_shift = ref_start_shifts[i]
+            end_shift = ref_end_shifts[i]
 
-            if seg_end > seg_start:
+            if seg_end > seg_start and seg_end != float('inf'):
                 ratio = (target_md - seg_start) / (seg_end - seg_start)
                 return start_shift + ratio * (end_shift - start_shift)
             return start_shift
 
-    # target_md before first segment
-    if target_md < ref_mds[0]:
-        return 0.0
-
     # target_md after last segment
-    return float(ref_shifts[-1])
+    return float(ref_end_shifts[-1])
 
 
 def run_slicing(data: Dict[str, Any], executor: GpuAutoGeosteeringExecutor,
@@ -565,6 +578,7 @@ def compare_with_reference(result: Dict[str, Any], data: Dict[str, Any], md_step
     Compare slicing result with reference interpretation.
 
     Uses interpolation to common MD grid for accurate comparison.
+    Note: Uses simplified MD-based interpolation, not VS-based as in projection.
 
     Args:
         result: Slicing result with interpretation
@@ -574,9 +588,10 @@ def compare_with_reference(result: Dict[str, Any], data: Dict[str, Any], md_step
     Returns metrics dict with MAE, RMSE, endpoint_error.
     """
     ref_mds = data['ref_segment_mds'].cpu().numpy()
-    ref_shifts = data['ref_shifts'].cpu().numpy()
+    ref_start_shifts = data['ref_start_shifts'].cpu().numpy()
+    ref_end_shifts = data['ref_shifts'].cpu().numpy()
 
-    if len(ref_shifts) == 0:
+    if len(ref_end_shifts) == 0:
         logger.warning("No reference interpretation for comparison")
         return {'error': 'no_reference'}
 
@@ -603,7 +618,8 @@ def compare_with_reference(result: Dict[str, Any], data: Dict[str, Any], md_step
     common_mds = np.arange(md_min, md_max + md_step, md_step)
 
     # Interpolate both to common grid
-    ref_interp = np.interp(common_mds, ref_mds, ref_shifts)
+    # Use ref_start_shifts for MD-based interpolation (shift at startMd of each segment)
+    ref_interp = np.interp(common_mds, ref_mds, ref_start_shifts)
     our_interp = np.interp(common_mds, our_mds, our_shifts)
 
     # Calculate metrics
@@ -613,9 +629,10 @@ def compare_with_reference(result: Dict[str, Any], data: Dict[str, Any], md_step
     max_error = np.max(np.abs(diffs))
     max_error_md = common_mds[np.argmax(np.abs(diffs))]
 
-    # Endpoint error (at last reference MD)
+    # Endpoint error (at last reference segment)
+    # ref_end_shifts[-1] is the endShift of the last segment
     endpoint_our = np.interp(ref_mds[-1], our_mds, our_shifts)
-    endpoint_error = endpoint_our - ref_shifts[-1]
+    endpoint_error = endpoint_our - ref_end_shifts[-1]
 
     return {
         'mae': float(mae),

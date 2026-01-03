@@ -146,6 +146,7 @@ class NeighborAngleAdvisor:
         """
         data = self.dataset[well_name]
         ref_mds = data['ref_segment_mds'].numpy()
+        ref_start_shifts = data['ref_start_shifts'].numpy()
         ref_shifts = data['ref_shifts'].numpy()
 
         if len(ref_mds) == 0:
@@ -159,14 +160,7 @@ class NeighborAngleAdvisor:
 
             if start_md <= md <= end_md:
                 # Get start and end shifts for this segment
-                if i == 0:
-                    # First segment - need to get start shift from somewhere
-                    # Usually it's in the JSON as startShift, but in dataset we only have endShift
-                    # Approximate: use previous segment's end_shift or 0
-                    start_shift = 0.0  # TODO: store start_shift in dataset
-                else:
-                    start_shift = ref_shifts[i - 1]
-
+                start_shift = ref_start_shifts[i]
                 end_shift = ref_shifts[i]
 
                 # Calculate dip angle
