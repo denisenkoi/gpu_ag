@@ -109,33 +109,13 @@ class LandingDetector:
         self.scaler = StandardScaler()
 
     def detect_landing(self, trajectory: List[TrajectoryPoint]) -> Optional[LandingBoundaries]:
-        """Detect landing using 2D clustering on (angle, derivative)"""
+        """Detect landing using physical thresholds (60° inclination, perch stability)"""
         if len(trajectory) < 10:
             logger.warning("Trajectory too short for landing detection")
             return None
 
-        # Prepare features: [inclination, derivative]
-        features = np.array([
-            [p.inclination_deg, p.inclination_derivative]
-            for p in trajectory
-        ])
-
-        # Scale features for clustering
-        features_scaled = self.scaler.fit_transform(features)
-
-        # K-means clustering with 3 clusters
-        kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
-        cluster_labels = kmeans.fit_predict(features_scaled)
-
-        # Assign cluster labels to trajectory points
-        for i, point in enumerate(trajectory):
-            point.cluster_id = cluster_labels[i]
-
-        # Analyze clusters to identify types
-        cluster_stats = self._analyze_clusters(trajectory, cluster_labels)
-
-        # Find landing boundaries
-        boundaries = self._find_landing_boundaries(trajectory, cluster_stats)
+        # Find landing boundaries using physical constraints (no clustering needed)
+        boundaries = self._find_landing_boundaries(trajectory, {})
 
         return boundaries
 
@@ -282,8 +262,9 @@ class LandingDetector:
 
         # Look for point with minimum derivative magnitude (most stable)
         for i in range(start_idx + 5, min(max_search_idx + 1, len(trajectory))):
-            # Skip if we're still in steep descent
-            if trajectory[i].inclination_deg < self.perch_min_angle_deg:
+            # Skip if we're still in steep descent (perch_min_angle_deg is from horizontal,
+            # so convert to from-vertical: 90 - perch_min_angle_deg)
+            if trajectory[i].inclination_deg < (90 - self.perch_min_angle_deg):
                 continue
 
             # Look for stability (low derivative)

@@ -22,31 +22,47 @@ from torch_funcs.batch_objective import compute_detailed_metrics_torch
 from torch_funcs.projection import calc_horizontal_projection_batch_torch
 
 
-def compute_well_angle(well_data: dict, target_md: float, lookback: float = 100.0) -> float:
+def compute_well_angle(well_data: dict, start_md: float, end_md: float) -> float:
     """
     Compute angle from WELL TRAJECTORY (not interpretation).
-    Angle = arctan(delta_tvd / delta_md)
+    Angle = arctan(delta_tvd / delta_vs)
+
+    Args:
+        well_data: dict with well_md, well_tvd, well_ns, well_ew
+        start_md: landing point MD
+        end_md: end point MD
     """
     well_md = np.array(well_data.get('well_md', []))
     well_tvd = np.array(well_data.get('well_tvd', []))
+    well_ns = np.array(well_data.get('well_ns', []))
+    well_ew = np.array(well_data.get('well_ew', []))
 
     if len(well_md) < 2:
         return 0.0
 
-    # Find indices for lookback window
-    end_idx = np.searchsorted(well_md, target_md)
-    start_idx = np.searchsorted(well_md, target_md - lookback)
+    # Find indices
+    start_idx = np.searchsorted(well_md, start_md)
+    end_idx = np.searchsorted(well_md, end_md)
 
     if end_idx <= start_idx or end_idx >= len(well_md):
         return 0.0
 
-    delta_tvd = well_tvd[end_idx] - well_tvd[start_idx]
-    delta_md = well_md[end_idx] - well_md[start_idx]
+    # Calculate VS (vertical section - horizontal distance)
+    vs_start = 0.0
+    vs_end = 0.0
+    for i in range(1, end_idx + 1):
+        delta_vs = np.sqrt((well_ns[i] - well_ns[i-1])**2 + (well_ew[i] - well_ew[i-1])**2)
+        if i <= start_idx:
+            vs_start += delta_vs
+        vs_end += delta_vs
 
-    if delta_md <= 0:
+    delta_tvd = well_tvd[end_idx] - well_tvd[start_idx]
+    delta_vs = vs_end - vs_start
+
+    if delta_vs <= 0:
         return 0.0
 
-    return np.degrees(np.arctan(delta_tvd / delta_md))
+    return np.degrees(np.arctan(delta_tvd / delta_vs))
 
 
 def compute_average_angle(well_data: dict) -> float:
@@ -252,8 +268,9 @@ def main():
         baseline_error = baseline_shift - ref_shift_end
 
         # Well trajectory angle (HONEST - no peeking!)
+        landing_md = well_data.get('detected_start_md') or well_data.get('start_md') or mds[0]
         end_md = mds[-1]
-        well_angle = compute_well_angle(well_data, end_md, lookback=100.0)
+        well_angle = compute_well_angle(well_data, landing_md, end_md)
 
         # For comparison: angle from reference (peeking)
         ref_angle = compute_average_angle(well_data)

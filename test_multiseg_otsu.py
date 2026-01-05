@@ -185,8 +185,11 @@ def process_well(well_name, well, settings, angle_range=1.0, angle_steps=11):
     except Exception as e:
         return {'error': f'OTSU failed: {e}'}
 
-    # Get baseline shift at zone start
-    baseline_shift = interpolate_shift_at_md(well, otsu_start_md)
+    # Get baseline shift at zone start (TVT=const from max_tvd) - NO CHEATING!
+    max_tvd_idx = int(np.argmax(well_tvd))
+    tvt_baseline = well_tvd[max_tvd_idx] - interpolate_shift_at_md(well, well_md[max_tvd_idx])
+    start_idx_for_shift = int(np.searchsorted(well_md, otsu_start_md))
+    baseline_shift = well_tvd[start_idx_for_shift] - tvt_baseline
 
     # Get trajectory angle in zone
     start_idx = int(np.searchsorted(well_md, otsu_start_md))

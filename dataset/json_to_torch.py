@@ -321,6 +321,20 @@ def process_single_json(json_path: Path, device: str = 'cpu',
             'y_surface': y_surface,
         }
 
+        # Calculate landing_end_87_200: first point where inclination >= 87° + 200m
+        incl87_md = None
+        for idx in range(1, len(raw_well_md)):
+            delta_tvd = raw_well_tvd[idx] - raw_well_tvd[idx-1]
+            delta_md = raw_well_md[idx] - raw_well_md[idx-1]
+            if delta_md > 0.1:
+                incl = 90 - np.degrees(np.arctan(abs(delta_tvd) / delta_md))
+                if incl >= 87:
+                    incl87_md = raw_well_md[idx]
+                    break
+        if incl87_md is None:
+            incl87_md = raw_well_md[len(raw_well_md)//2]
+        result['landing_end_87_200'] = incl87_md + 200
+
         # Add landing and normalization if calculated
         if landing_norm:
             result['perch_md'] = landing_norm['perch_md']

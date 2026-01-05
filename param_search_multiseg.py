@@ -106,8 +106,11 @@ def get_otsu_zone_and_segments(
     if end_idx - start_idx < 50:
         return None
 
-    # Baseline shift and ref end shift
-    baseline_shift = interpolate_shift_at_md(well_data, zone_start)
+    # Baseline shift (TVT=const from max_tvd) - NO CHEATING!
+    max_tvd_idx = int(np.argmax(well_tvd))
+    tvt_baseline = well_tvd[max_tvd_idx] - interpolate_shift_at_md(well_data, well_md[max_tvd_idx])
+    baseline_shift = well_tvd[start_idx] - tvt_baseline
+    # Ref end shift for comparison
     ref_end_shift = interpolate_shift_at_md(well_data, zone_end)
 
     # Trajectory angle
