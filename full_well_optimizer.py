@@ -15,6 +15,7 @@ Based on param_search findings:
 """
 
 import sys
+import os
 import time
 import torch
 import numpy as np
@@ -23,11 +24,18 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent / "cpu_baseline"))
 
 from torch_funcs.converters import GPU_DTYPE
 from smart_segmenter import SmartSegmenter
 from peak_detectors import OtsuPeakDetector, RegionFinder
 from numpy_funcs.interpretation import interpolate_shift_at_md
+from cpu_baseline.typewell_provider import stitch_typewell_from_dataset, compute_overlap_metrics
+
+# Read typewell mode from env
+# NEW = correct: TypeLog raw (reference), PseudoTypeLog × mult, Well GR × mult
+# OLD = legacy: TypeLog × (1/mult), PseudoTypeLog raw, Well GR × mult
+NORMALIZATION_MODE = os.getenv('NORMALIZATION_MODE', 'NEW')
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -217,50 +225,38 @@ def get_segment_boundaries(
     if end_idx - start_idx < 20:
         return [(start_idx, end_idx)]
 
-    # Try SmartSegmenter
-    try:
-        zone_data = {
-            'well_md': torch.tensor(well_md),
-            'log_md': torch.tensor(well_md),
-            'log_gr': torch.tensor(well_gr),
-            'start_md': start_md,
-            'detected_start_md': start_md,
-        }
+    zone_data = {
+        'well_md': torch.tensor(well_md),
+        'log_md': torch.tensor(well_md),
+        'log_gr': torch.tensor(well_gr),
+        'start_md': start_md,
+        'detected_start_md': start_md,
+    }
 
-        segmenter = SmartSegmenter(zone_data, settings)
-        all_boundaries = []
-        while not segmenter.is_finished:
-            result = segmenter.next_slice()
-            for bp in result.boundaries:
-                if bp.md <= end_md:
-                    all_boundaries.append(bp)
-            if result.is_final or (result.boundaries and result.boundaries[-1].md >= end_md):
-                break
+    segmenter = SmartSegmenter(zone_data, settings)
+    all_boundaries = []
+    while not segmenter.is_finished:
+        result = segmenter.next_slice()
+        for bp in result.boundaries:
+            if bp.md <= end_md:
+                all_boundaries.append(bp)
+        if result.is_final or (result.boundaries and result.boundaries[-1].md >= end_md):
+            break
 
-        # Create segment indices
-        seg_indices = []
-        prev_idx = start_idx
-        for bp in all_boundaries[:max_segments-1]:
-            bp_idx = int(np.searchsorted(well_md, bp.md))
-            if bp_idx > prev_idx:
-                seg_indices.append((prev_idx, bp_idx))
-                prev_idx = bp_idx
-        if prev_idx < end_idx:
-            seg_indices.append((prev_idx, end_idx))
+    # Create segment indices
+    seg_indices = []
+    prev_idx = start_idx
+    for bp in all_boundaries[:max_segments-1]:
+        bp_idx = int(np.searchsorted(well_md, bp.md))
+        if bp_idx > prev_idx:
+            seg_indices.append((prev_idx, bp_idx))
+            prev_idx = bp_idx
+    if prev_idx < end_idx:
+        seg_indices.append((prev_idx, end_idx))
 
-        if seg_indices:
-            return seg_indices
-    except:
-        pass
+    if not seg_indices:
+        raise RuntimeError(f"SmartSegmenter returned no segments for MD {start_md:.1f}-{end_md:.1f}")
 
-    # Fallback to equal segments
-    n_points = end_idx - start_idx
-    seg_len = n_points // max_segments
-    if seg_len < 10:
-        return [(start_idx, end_idx)]
-
-    seg_indices = [(start_idx + i*seg_len, start_idx + (i+1)*seg_len) for i in range(max_segments)]
-    seg_indices[-1] = (seg_indices[-1][0], end_idx)
     return seg_indices
 
 
@@ -284,35 +280,30 @@ def get_all_segment_boundaries_pelt(
             'segments_count': 100,  # Large number to get all boundaries
         }
 
-    try:
-        zone_data = {
-            'well_md': torch.tensor(well_md),
-            'log_md': torch.tensor(well_md),
-            'log_gr': torch.tensor(well_gr),
-            'start_md': start_md,
-            'detected_start_md': start_md,
-        }
+    zone_data = {
+        'well_md': torch.tensor(well_md),
+        'log_md': torch.tensor(well_md),
+        'log_gr': torch.tensor(well_gr),
+        'start_md': start_md,
+        'detected_start_md': start_md,
+    }
 
-        segmenter = SmartSegmenter(zone_data, settings)
-        boundaries = []
+    segmenter = SmartSegmenter(zone_data, settings)
+    boundaries = []
 
-        while not segmenter.is_finished:
-            result = segmenter.next_slice()
-            for bp in result.boundaries:
-                if start_md < bp.md <= end_md:
-                    boundaries.append(bp.md)
-            if result.is_final:
-                break
+    while not segmenter.is_finished:
+        result = segmenter.next_slice()
+        for bp in result.boundaries:
+            if start_md < bp.md <= end_md:
+                boundaries.append(bp.md)
+        if result.is_final:
+            break
 
-        # Add end_md if not already there
-        if not boundaries or boundaries[-1] < end_md - 1:
-            boundaries.append(end_md)
+    # Add end_md if not already there
+    if not boundaries or boundaries[-1] < end_md - 1:
+        boundaries.append(end_md)
 
-        return sorted(set(boundaries))
-    except:
-        # Fallback: equal segments ~50m
-        n_segs = max(1, int((end_md - start_md) / 50))
-        return [start_md + (i+1) * (end_md - start_md) / n_segs for i in range(n_segs)]
+    return sorted(set(boundaries))
 
 
 def optimize_full_well(
@@ -356,12 +347,21 @@ def optimize_full_well(
     well_tvd = well_data['well_tvd'].numpy()
     log_md = well_data['log_md'].numpy()
     log_gr = well_data['log_gr'].numpy()
-    type_tvd = well_data['type_tvd'].numpy()
-    type_gr = well_data['type_gr'].numpy()
-    tvd_shift = float(well_data.get('tvd_typewell_shift', 0.0))
 
-    # Interpolate GR to well_md
+    # Get typewell (stitched or original based on NORMALIZATION_MODE env)
+    type_tvd, type_gr = stitch_typewell_from_dataset(well_data, mode=NORMALIZATION_MODE, apply_smoothing=True)
+
+    # tvd_shift: for stitched mode (pseudo) it's 0, for original it's from dataset
+    if NORMALIZATION_MODE == 'ORIGINAL':
+        tvd_shift = float(well_data.get('tvd_typewell_shift', 0.0))
+    else:
+        tvd_shift = 0.0  # Stitched typewell is already in well TVD coordinates
+
+    # Interpolate GR to well_md and apply normalization
     well_gr = np.interp(well_md, log_md, log_gr)
+    norm_multiplier = float(well_data.get('norm_multiplier', 1.0))
+    if norm_multiplier != 1.0:
+        well_gr = well_gr * norm_multiplier
 
     # Determine start point
     if start_from_landing:
@@ -514,7 +514,6 @@ def test_single_well(well_name: str = "Well1221~EGFDL"):
     segments = optimize_full_well(
         well_name, well_data,
         angle_range=1.5,
-        mse_power=1.0,
         verbose=True,
     )
     t1 = time.time()
@@ -534,7 +533,6 @@ def test_single_well(well_name: str = "Well1221~EGFDL"):
     segments = optimize_full_well(
         well_name, well_data,
         angle_range=1.0,
-        mse_power=1.0,
         verbose=True,
     )
     t1 = time.time()
@@ -547,25 +545,41 @@ def test_single_well(well_name: str = "Well1221~EGFDL"):
         print(f"Time: {t1-t0:.1f}s")
 
 
-def test_all_wells(angle_range: float = 1.5):
-    """Test on all 100 wells."""
+def test_all_wells(angle_range: float = 1.5, save_csv: bool = True):
+    """Test on all 100 wells with optional CSV export."""
+    import csv
+    from datetime import datetime
+
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     print(f"Testing full well optimization on 100 wells (angle_range=±{angle_range}°)")
+    print(f"Run ID: {run_id}")
     print("=" * 70)
 
     ds = torch.load('dataset/gpu_ag_dataset.pt', weights_only=False)
+
+    # CSV setup
+    csv_rows = []
+    csv_header = [
+        'run_id', 'well_name', 'row_type', 'seg_idx',
+        'md_start', 'md_end', 'end_shift', 'end_error',
+        'angle_deg', 'pearson', 'baseline_error', 'opt_error',
+        'rmse', 'n_segments', 'time_sec'
+    ]
 
     errors = []
     baseline_errors = []
     t_start = time.time()
 
     for i, (well_name, well_data) in enumerate(ds.items()):
+        t_well_start = time.time()
+
         # Get reference end shift
         well_md = well_data['well_md'].numpy()
         log_md = well_data['log_md'].numpy()
         ref_end_md = min(well_md[-1], log_md[-1])
         ref_end_shift = interpolate_shift_at_md(well_data, ref_end_md)
 
-        # Baseline (TVT=const from 87° + 200m point) - use pre-calculated field
+        # Baseline (TVT=const from 87° + 200m point)
         well_tvd = well_data['well_tvd'].numpy()
         baseline_md = float(well_data.get('landing_end_87_200', well_md[len(well_md)//2]))
         baseline_idx = min(int(np.searchsorted(well_md, baseline_md)), len(well_md) - 1)
@@ -575,23 +589,62 @@ def test_all_wells(angle_range: float = 1.5):
         baseline_errors.append(baseline_error)
 
         # Optimize
-        try:
-            segments = optimize_full_well(
-                well_name, well_data,
-                angle_range=angle_range,
-                mse_power=1.0,
-                verbose=False,
-            )
+        segments = optimize_full_well(
+            well_name, well_data,
+            angle_range=angle_range,
+            verbose=False,
+        )
 
-            if segments:
-                pred_end_shift = segments[-1].end_shift
-                error = pred_end_shift - ref_end_shift
-            else:
-                error = baseline_error
-        except Exception as e:
-            error = baseline_error
+        if not segments:
+            raise RuntimeError(f"No segments returned for {well_name}")
 
-        errors.append(error)
+        pred_end_shift = segments[-1].end_shift
+        opt_error = pred_end_shift - ref_end_shift
+        errors.append(opt_error)
+
+        t_well = time.time() - t_well_start
+
+        # Save segment rows
+        if save_csv:
+            cumulative_shift = segments[0].start_shift
+            for seg_idx, seg in enumerate(segments):
+                seg_error = seg.end_shift - interpolate_shift_at_md(well_data, seg.end_md)
+                csv_rows.append({
+                    'run_id': run_id,
+                    'well_name': well_name,
+                    'row_type': 'segment',
+                    'seg_idx': seg_idx,
+                    'md_start': f"{seg.start_md:.1f}",
+                    'md_end': f"{seg.end_md:.1f}",
+                    'end_shift': f"{seg.end_shift:.2f}",
+                    'end_error': f"{seg_error:.2f}",
+                    'angle_deg': f"{seg.angle_deg:.3f}",
+                    'pearson': f"{seg.pearson:.3f}",
+                    'baseline_error': '',
+                    'opt_error': '',
+                    'rmse': '',
+                    'n_segments': '',
+                    'time_sec': '',
+                })
+
+            # Well summary row
+            csv_rows.append({
+                'run_id': run_id,
+                'well_name': well_name,
+                'row_type': 'well',
+                'seg_idx': '',
+                'md_start': f"{segments[0].start_md:.1f}",
+                'md_end': f"{segments[-1].end_md:.1f}",
+                'end_shift': f"{pred_end_shift:.2f}",
+                'end_error': f"{opt_error:.2f}",
+                'angle_deg': f"{np.mean([s.angle_deg for s in segments]):.3f}",
+                'pearson': f"{np.mean([s.pearson for s in segments]):.3f}",
+                'baseline_error': f"{baseline_error:.2f}",
+                'opt_error': f"{opt_error:.2f}",
+                'rmse': '',
+                'n_segments': len(segments),
+                'time_sec': f"{t_well:.2f}",
+            })
 
         if (i + 1) % 20 == 0:
             print(f"  {i+1}/100 wells processed...")
@@ -604,6 +657,39 @@ def test_all_wells(angle_range: float = 1.5):
     rmse_opt = np.sqrt(np.mean(errors**2))
     rmse_baseline = np.sqrt(np.mean(baseline_errors**2))
     improved = np.sum(np.abs(errors) < np.abs(baseline_errors))
+
+    # Summary row
+    if save_csv:
+        csv_rows.append({
+            'run_id': run_id,
+            'well_name': 'ALL_WELLS',
+            'row_type': 'summary',
+            'seg_idx': '',
+            'md_start': '',
+            'md_end': '',
+            'end_shift': '',
+            'end_error': '',
+            'angle_deg': f"{angle_range:.1f}",
+            'pearson': '',
+            'baseline_error': f"{rmse_baseline:.2f}",
+            'opt_error': f"{rmse_opt:.2f}",
+            'rmse': f"{rmse_opt:.2f}",
+            'n_segments': improved,
+            'time_sec': f"{t_elapsed:.1f}",
+        })
+
+        # Write CSV
+        csv_path = Path(__file__).parent / 'results' / 'full_well_stats.csv'
+        csv_path.parent.mkdir(exist_ok=True)
+
+        file_exists = csv_path.exists()
+        with open(csv_path, 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=csv_header)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerows(csv_rows)
+
+        print(f"\nStats saved to: {csv_path}")
 
     print()
     print(f"Results (angle_range=±{angle_range}°):")
@@ -619,10 +705,8 @@ def test_all_wells(angle_range: float = 1.5):
 if __name__ == '__main__':
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == '--all':
-        # Test both angle ranges
+        # Test with angle_range=1.5 (best results)
         print("\n" + "="*70)
         test_all_wells(angle_range=1.5)
-        print("\n" + "="*70)
-        test_all_wells(angle_range=1.0)
     else:
         test_single_well()

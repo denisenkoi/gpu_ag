@@ -47,7 +47,8 @@ from cpu_baseline.typewell_provider import extend_pseudo_with_typelog
 
 # Normalization mode: 'OLD' = type×(1/mult), pseudo raw
 #                     'NEW' = pseudo×mult, type raw
-NORMALIZATION_MODE = os.getenv('NORMALIZATION_MODE', 'OLD')
+# NEW = correct: TypeLog raw (reference), PseudoTypeLog × mult, Well GR × mult
+NORMALIZATION_MODE = os.getenv('NORMALIZATION_MODE', 'NEW')
 
 logging.basicConfig(
     level=logging.INFO,

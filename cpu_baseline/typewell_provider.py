@@ -16,9 +16,15 @@ Date: 2025-12-24
 import os
 import logging
 import numpy as np
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
+from scipy.signal import savgol_filter
 
 logger = logging.getLogger(__name__)
+
+
+# Read smoothing params from env
+GR_SMOOTHING_WINDOW = int(os.getenv('GR_SMOOTHING_WINDOW', '0'))
+GR_SMOOTHING_ORDER = int(os.getenv('GR_SMOOTHING_ORDER', '2'))
 
 
 def extend_pseudo_with_typelog(pseudo_log: Dict, type_log: Dict, norm_coef: float = 1.0) -> Dict:
@@ -139,6 +145,166 @@ def extend_pseudo_with_typelog(pseudo_log: Dict, type_log: Dict, norm_coef: floa
                 f"down={len(new_points_down)}, up={len(new_points_up)}, norm_coef={norm_coef:.6f}")
 
     return extended_pseudo
+
+
+def apply_gr_smoothing(gr: np.ndarray, window: int = None, order: int = None) -> np.ndarray:
+    """
+    Apply Savitzky-Golay smoothing to GR data.
+
+    Args:
+        gr: GR values array
+        window: Window size (default from GR_SMOOTHING_WINDOW env)
+        order: Polynomial order (default from GR_SMOOTHING_ORDER env)
+
+    Returns:
+        Smoothed GR array (or original if window < 3)
+    """
+    if window is None:
+        window = GR_SMOOTHING_WINDOW
+    if order is None:
+        order = GR_SMOOTHING_ORDER
+
+    if window < 3 or len(gr) < window:
+        return gr
+
+    # Window must be odd
+    if window % 2 == 0:
+        window += 1
+
+    # Order must be less than window
+    order = min(order, window - 1)
+
+    return savgol_filter(gr, window, order)
+
+
+def stitch_typewell_from_dataset(
+    data: Dict[str, Any],
+    mode: str = None,
+    apply_smoothing: bool = True
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Stitch pseudo + type from dataset tensors with normalization and optional smoothing.
+
+    Unified function for all modules (optimizer, visualizer, slicer).
+
+    Args:
+        data: Well data from dataset (contains pseudo_tvd, pseudo_gr, type_tvd, type_gr, norm_multiplier as tensors)
+        mode: 'OLD' = type×(1/mult), pseudo raw (stitched)
+              'NEW' = pseudo×mult, type raw (stitched)
+              'ORIGINAL' = pure typeLog, no pseudo stitching
+              None = read from NORMALIZATION_MODE env (default 'OLD')
+        apply_smoothing: Apply Savitzky-Golay filter (uses GR_SMOOTHING_WINDOW env)
+
+    Returns:
+        Tuple of (tvd_array, gr_array) as numpy arrays
+    """
+    if mode is None:
+        mode = os.getenv('NORMALIZATION_MODE', 'NEW')
+
+    norm_multiplier = data.get('norm_multiplier', 1.0)
+    if hasattr(norm_multiplier, 'item'):
+        norm_multiplier = norm_multiplier.item()
+
+    # Get raw data from tensors
+    pseudo_tvd = data['pseudo_tvd'].cpu().numpy() if hasattr(data['pseudo_tvd'], 'cpu') else np.array(data['pseudo_tvd'])
+    pseudo_gr = data['pseudo_gr'].cpu().numpy() if hasattr(data['pseudo_gr'], 'cpu') else np.array(data['pseudo_gr'])
+    type_tvd = data['type_tvd'].cpu().numpy() if hasattr(data['type_tvd'], 'cpu') else np.array(data['type_tvd'])
+    type_gr = data['type_gr'].cpu().numpy() if hasattr(data['type_gr'], 'cpu') else np.array(data['type_gr'])
+
+    # ORIGINAL mode: pure typeLog without stitching
+    if mode == 'ORIGINAL':
+        logger.debug(f"Using ORIGINAL typeLog (no pseudo stitching), {len(type_tvd)} points")
+        result_tvd = type_tvd
+        result_gr = type_gr
+    else:
+        # Build dict format for extend_pseudo_with_typelog
+        pseudo_dict = {
+            'tvdSortedPoints': [{'trueVerticalDepth': float(tvd), 'data': float(gr)}
+                               for tvd, gr in zip(pseudo_tvd, pseudo_gr)]
+        }
+        type_dict = {
+            'tvdSortedPoints': [{'trueVerticalDepth': float(tvd), 'data': float(gr)}
+                               for tvd, gr in zip(type_tvd, type_gr)]
+        }
+
+        if mode == 'NEW':
+            # NEW: pseudo × mult, type raw
+            if norm_multiplier != 1.0:
+                for p in pseudo_dict['tvdSortedPoints']:
+                    p['data'] *= norm_multiplier
+            stitched = extend_pseudo_with_typelog(pseudo_dict, type_dict, norm_coef=1.0)
+        else:
+            # OLD: pseudo raw, type × (1/mult)
+            norm_coef = 1.0 / norm_multiplier if norm_multiplier != 0 else 1.0
+            stitched = extend_pseudo_with_typelog(pseudo_dict, type_dict, norm_coef=norm_coef)
+
+        points = stitched.get('tvdSortedPoints', [])
+        result_tvd = np.array([p['trueVerticalDepth'] for p in points])
+        result_gr = np.array([p['data'] for p in points])
+
+    # Apply smoothing if enabled
+    if apply_smoothing and GR_SMOOTHING_WINDOW >= 3:
+        result_gr = apply_gr_smoothing(result_gr)
+        logger.debug(f"Applied Savitzky-Golay smoothing (window={GR_SMOOTHING_WINDOW}, order={GR_SMOOTHING_ORDER})")
+
+    return result_tvd, result_gr
+
+
+def compute_overlap_metrics(
+    type_tvd: np.ndarray, type_gr: np.ndarray,
+    pseudo_tvd: np.ndarray, pseudo_gr: np.ndarray
+) -> Dict[str, float]:
+    """
+    Compute MSE and Pearson correlation in overlap zone (normalized).
+
+    Args:
+        type_tvd, type_gr: TypeLog arrays
+        pseudo_tvd, pseudo_gr: PseudoTypeLog arrays
+
+    Returns:
+        Dict with 'mse' (×10), 'pearson', 'overlap_start', 'overlap_end', 'overlap_length'
+    """
+    # Find overlap zone
+    overlap_start = max(type_tvd.min(), pseudo_tvd.min())
+    overlap_end = min(type_tvd.max(), pseudo_tvd.max())
+
+    if overlap_end <= overlap_start:
+        return {'mse': np.nan, 'pearson': np.nan, 'overlap_start': 0, 'overlap_end': 0, 'overlap_length': 0}
+
+    # Interpolate both to common grid in overlap zone
+    step = 0.1  # 0.1m step
+    common_tvd = np.arange(overlap_start, overlap_end, step)
+
+    type_interp = np.interp(common_tvd, type_tvd, type_gr)
+    pseudo_interp = np.interp(common_tvd, pseudo_tvd, pseudo_gr)
+
+    # Normalize: find local min/max, scale to 0-100
+    all_gr = np.concatenate([type_interp, pseudo_interp])
+    gr_min, gr_max = all_gr.min(), all_gr.max()
+
+    if gr_max - gr_min < 1e-6:
+        return {'mse': 0.0, 'pearson': 1.0, 'overlap_start': overlap_start, 'overlap_end': overlap_end,
+                'overlap_length': overlap_end - overlap_start}
+
+    type_norm = (type_interp - gr_min) / (gr_max - gr_min) * 100
+    pseudo_norm = (pseudo_interp - gr_min) / (gr_max - gr_min) * 100
+
+    # MSE × 10
+    mse = np.mean((type_norm - pseudo_norm) ** 2) * 10
+
+    # Pearson
+    type_centered = type_norm - type_norm.mean()
+    pseudo_centered = pseudo_norm - pseudo_norm.mean()
+    denom = np.sqrt((type_centered ** 2).sum() * (pseudo_centered ** 2).sum())
+    pearson = (type_centered * pseudo_centered).sum() / denom if denom > 1e-10 else 0.0
+
+    return {
+        'mse': float(mse),
+        'pearson': float(pearson),
+        'overlap_start': float(overlap_start),
+        'overlap_end': float(overlap_end),
+        'overlap_length': float(overlap_end - overlap_start)
+    }
 
 
 class TypewellProvider:
