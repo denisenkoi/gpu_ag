@@ -30,7 +30,7 @@ from torch_funcs.converters import GPU_DTYPE
 from smart_segmenter import SmartSegmenter
 from peak_detectors import OtsuPeakDetector, RegionFinder
 from numpy_funcs.interpretation import interpolate_shift_at_md
-from cpu_baseline.typewell_provider import stitch_typewell_from_dataset, compute_overlap_metrics
+from cpu_baseline.typelog_preprocessing import prepare_typelog, normalize_well_gr
 import pandas as pd
 
 # Load SC baseline from CSV (once at module load)
@@ -46,10 +46,8 @@ def get_sc_landing_rmse(well_name: str) -> float:
             _SC_BASELINE_CACHE = dict(zip(df['well_name'], df['gr_var_mean']))
     return _SC_BASELINE_CACHE.get(well_name, 4.0)  # Default to median ~4%
 
-# Read typewell mode from env
-# NEW = correct: TypeLog raw (reference), PseudoTypeLog × mult, Well GR × mult
-# OLD = legacy: TypeLog × (1/mult), PseudoTypeLog raw, Well GR × mult
-NORMALIZATION_MODE = os.getenv('NORMALIZATION_MODE', 'NEW')
+# Read typelog mode from env
+USE_PSEUDO_TYPELOG = os.getenv('USE_PSEUDO_TYPELOG', 'True').lower() in ('true', '1', 'yes')
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -213,7 +211,6 @@ def optimize_segment_block_gpu(
     well_gr: np.ndarray,
     type_tvd: np.ndarray,
     type_gr: np.ndarray,
-    tvd_shift: float,
     angle_range: float = 1.5,
     angle_step: float = 0.2,
     pearson_power: float = 1.0,
@@ -264,7 +261,7 @@ def optimize_segment_block_gpu(
     zone_gr_centered = zone_gr - zone_gr.mean()
     zone_gr_ss = (zone_gr_centered**2).sum()
 
-    type_tvd_t = torch.tensor(type_tvd + tvd_shift, device=device, dtype=GPU_DTYPE)
+    type_tvd_t = torch.tensor(type_tvd, device=device, dtype=GPU_DTYPE)  # Already in well coordinates
     type_gr_t = torch.tensor(type_gr, device=device, dtype=GPU_DTYPE)
 
     # Precompute segment data
@@ -382,7 +379,6 @@ def optimize_segment_block_evolutionary(
     well_gr: np.ndarray,
     type_tvd: np.ndarray,
     type_gr: np.ndarray,
-    tvd_shift: float,
     angle_range: float = 1.5,
     mse_weight: float = 0.1,
     device: str = DEVICE,
@@ -416,7 +412,7 @@ def optimize_segment_block_evolutionary(
     zone_gr_ss = (zone_gr_centered**2).sum()
     zone_gr_var = zone_gr.var()
 
-    type_tvd_t = torch.tensor(type_tvd + tvd_shift, device=device, dtype=GPU_DTYPE)
+    type_tvd_t = torch.tensor(type_tvd, device=device, dtype=GPU_DTYPE)  # Already in well coordinates
     type_gr_t = torch.tensor(type_gr, device=device, dtype=GPU_DTYPE)
 
     # Precompute segment data
@@ -759,20 +755,22 @@ def optimize_full_well(
     log_md = well_data['log_md'].numpy()
     log_gr = well_data['log_gr'].numpy()
 
-    # Get typewell (stitched or original based on NORMALIZATION_MODE env)
-    type_tvd, type_gr = stitch_typewell_from_dataset(well_data, mode=NORMALIZATION_MODE, apply_smoothing=True)
+    # Get typewell with correct coordinate alignment (tvd_shift applied BEFORE stitching)
+    type_tvd, type_gr, typelog_meta = prepare_typelog(
+        well_data,
+        use_pseudo=USE_PSEUDO_TYPELOG,
+        apply_smoothing=True
+    )
 
-    # tvd_shift: for stitched mode (pseudo) it's 0, for original it's from dataset
-    if NORMALIZATION_MODE == 'ORIGINAL':
-        tvd_shift = float(well_data.get('tvd_typewell_shift', 0.0))
-    else:
-        tvd_shift = 0.0  # Stitched typewell is already in well TVD coordinates
-
-    # Interpolate GR to well_md and apply normalization
+    # Interpolate GR to well_md and apply same normalization as TypeLog
     well_gr = np.interp(well_md, log_md, log_gr)
     norm_multiplier = float(well_data.get('norm_multiplier', 1.0))
-    if norm_multiplier != 1.0:
-        well_gr = well_gr * norm_multiplier
+    well_gr = normalize_well_gr(
+        well_gr,
+        norm_multiplier,
+        typelog_meta['gr_min'],
+        typelog_meta['gr_max']
+    )
 
     # Determine start point
     if start_from_landing:
@@ -865,7 +863,7 @@ def optimize_full_well(
             pearson, end_shift, best_angles, _ = optimize_segment_block_evolutionary(
                 seg_indices, current_shift, traj_angle,
                 well_md, well_tvd, well_gr,
-                type_tvd, type_gr, tvd_shift,
+                type_tvd, type_gr,
                 angle_range=effective_angle_range,
                 mse_weight=mse_weight,
                 algorithm=algorithm.upper(),
@@ -877,7 +875,7 @@ def optimize_full_well(
             pearson, end_shift, best_angles, _ = optimize_segment_block_gpu(
                 seg_indices, current_shift, traj_angle,
                 well_md, well_tvd, well_gr,
-                type_tvd, type_gr, tvd_shift,
+                type_tvd, type_gr,
                 angle_range=effective_angle_range,
                 angle_step=angle_step,
                 pearson_power=pearson_power,
