@@ -976,32 +976,50 @@ def test_single_well(well_name: str = "Well1221~EGFDL"):
 
 
 def test_all_wells(angle_range: float = 1.5, save_csv: bool = True):
-    """Test on all 100 wells with optional CSV export."""
+    """Test on all 100 wells with CSV export after each well."""
     import csv
     from datetime import datetime
 
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_started = datetime.now().isoformat()
     print(f"Testing full well optimization on 100 wells (angle_range=±{angle_range}°)")
     print(f"Run ID: {run_id}")
+    print(f"Started: {run_started}")
     print("=" * 70)
+    sys.stdout.flush()
 
-    ds = torch.load('dataset/gpu_ag_dataset.pt', weights_only=False)
-
-    # CSV setup
-    csv_rows = []
+    # CSV setup - new file for this run
+    csv_path = Path(__file__).parent / 'results' / f'full_well_{run_id}.csv'
+    csv_path.parent.mkdir(exist_ok=True)
     csv_header = [
         'run_id', 'well_name', 'row_type', 'seg_idx',
         'md_start', 'md_end', 'end_shift', 'end_error',
         'angle_deg', 'pearson', 'baseline_error', 'opt_error',
-        'rmse', 'n_segments', 'time_sec'
+        'n_segments', 'prep_ms', 'opt_ms', 'total_ms',
+        'started_at', 'finished_at'
     ]
+
+    # Write header
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=csv_header)
+        writer.writeheader()
+
+    print(f"CSV: {csv_path}")
+    print("-" * 70)
+    sys.stdout.flush()
+
+    ds = torch.load('dataset/gpu_ag_dataset.pt', weights_only=False)
 
     errors = []
     baseline_errors = []
     t_start = time.time()
 
     for i, (well_name, well_data) in enumerate(ds.items()):
+        well_started = datetime.now().isoformat()
         t_well_start = time.time()
+
+        # === PREP PHASE ===
+        t_prep_start = time.time()
 
         # Get reference end shift
         well_md = well_data['well_md'].numpy()
@@ -1018,12 +1036,18 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True):
         baseline_error = baseline_shift - ref_end_shift
         baseline_errors.append(baseline_error)
 
-        # Optimize
+        prep_ms = int((time.time() - t_prep_start) * 1000)
+
+        # === OPTIMIZATION PHASE ===
+        t_opt_start = time.time()
+
         segments = optimize_full_well(
             well_name, well_data,
             angle_range=angle_range,
             verbose=False,
         )
+
+        opt_ms = int((time.time() - t_opt_start) * 1000)
 
         if not segments:
             raise RuntimeError(f"No segments returned for {well_name}")
@@ -1032,54 +1056,70 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True):
         opt_error = pred_end_shift - ref_end_shift
         errors.append(opt_error)
 
-        t_well = time.time() - t_well_start
+        well_finished = datetime.now().isoformat()
+        total_ms = int((time.time() - t_well_start) * 1000)
 
-        # Save segment rows
-        if save_csv:
-            cumulative_shift = segments[0].start_shift
-            for seg_idx, seg in enumerate(segments):
-                seg_error = seg.end_shift - interpolate_shift_at_md(well_data, seg.end_md)
-                csv_rows.append({
-                    'run_id': run_id,
-                    'well_name': well_name,
-                    'row_type': 'segment',
-                    'seg_idx': seg_idx,
-                    'md_start': f"{seg.start_md:.1f}",
-                    'md_end': f"{seg.end_md:.1f}",
-                    'end_shift': f"{seg.end_shift:.2f}",
-                    'end_error': f"{seg_error:.2f}",
-                    'angle_deg': f"{seg.angle_deg:.3f}",
-                    'pearson': f"{seg.pearson:.3f}",
-                    'baseline_error': '',
-                    'opt_error': '',
-                    'rmse': '',
-                    'n_segments': '',
-                    'time_sec': '',
-                })
+        # === WRITE TO CSV IMMEDIATELY ===
+        csv_rows = []
 
-            # Well summary row
+        # Segment rows
+        for seg_idx, seg in enumerate(segments):
+            seg_error = seg.end_shift - interpolate_shift_at_md(well_data, seg.end_md)
             csv_rows.append({
                 'run_id': run_id,
                 'well_name': well_name,
-                'row_type': 'well',
-                'seg_idx': '',
-                'md_start': f"{segments[0].start_md:.1f}",
-                'md_end': f"{segments[-1].end_md:.1f}",
-                'end_shift': f"{pred_end_shift:.2f}",
-                'end_error': f"{opt_error:.2f}",
-                'angle_deg': f"{np.mean([s.angle_deg for s in segments]):.3f}",
-                'pearson': f"{np.mean([s.pearson for s in segments]):.3f}",
-                'baseline_error': f"{baseline_error:.2f}",
-                'opt_error': f"{opt_error:.2f}",
-                'rmse': '',
-                'n_segments': len(segments),
-                'time_sec': f"{t_well:.2f}",
+                'row_type': 'segment',
+                'seg_idx': seg_idx,
+                'md_start': f"{seg.start_md:.1f}",
+                'md_end': f"{seg.end_md:.1f}",
+                'end_shift': f"{seg.end_shift:.2f}",
+                'end_error': f"{seg_error:.2f}",
+                'angle_deg': f"{seg.angle_deg:.3f}",
+                'pearson': f"{seg.pearson:.3f}",
+                'baseline_error': '',
+                'opt_error': '',
+                'n_segments': '',
+                'prep_ms': '',
+                'opt_ms': '',
+                'total_ms': '',
+                'started_at': '',
+                'finished_at': '',
             })
 
-        if (i + 1) % 20 == 0:
-            print(f"  {i+1}/100 wells processed...")
+        # Well summary row
+        csv_rows.append({
+            'run_id': run_id,
+            'well_name': well_name,
+            'row_type': 'well',
+            'seg_idx': '',
+            'md_start': f"{segments[0].start_md:.1f}",
+            'md_end': f"{segments[-1].end_md:.1f}",
+            'end_shift': f"{pred_end_shift:.2f}",
+            'end_error': f"{opt_error:.2f}",
+            'angle_deg': f"{np.mean([s.angle_deg for s in segments]):.3f}",
+            'pearson': f"{np.mean([s.pearson for s in segments]):.3f}",
+            'baseline_error': f"{baseline_error:.2f}",
+            'opt_error': f"{opt_error:.2f}",
+            'n_segments': len(segments),
+            'prep_ms': prep_ms,
+            'opt_ms': opt_ms,
+            'total_ms': total_ms,
+            'started_at': well_started,
+            'finished_at': well_finished,
+        })
+
+        # Append to CSV and flush
+        with open(csv_path, 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=csv_header)
+            writer.writerows(csv_rows)
+
+        # Progress output
+        status = "✓" if abs(opt_error) < abs(baseline_error) else "✗"
+        print(f"{i+1:3d}/100 {well_name:<20} base={baseline_error:+7.2f}m opt={opt_error:+7.2f}m {status} prep={prep_ms}ms opt={opt_ms}ms")
+        sys.stdout.flush()
 
     t_elapsed = time.time() - t_start
+    run_finished = datetime.now().isoformat()
 
     errors = np.array(errors)
     baseline_errors = np.array(baseline_errors)
@@ -1089,45 +1129,41 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True):
     improved = np.sum(np.abs(errors) < np.abs(baseline_errors))
 
     # Summary row
-    if save_csv:
-        csv_rows.append({
-            'run_id': run_id,
-            'well_name': 'ALL_WELLS',
-            'row_type': 'summary',
-            'seg_idx': '',
-            'md_start': '',
-            'md_end': '',
-            'end_shift': '',
-            'end_error': '',
-            'angle_deg': f"{angle_range:.1f}",
-            'pearson': '',
-            'baseline_error': f"{rmse_baseline:.2f}",
-            'opt_error': f"{rmse_opt:.2f}",
-            'rmse': f"{rmse_opt:.2f}",
-            'n_segments': improved,
-            'time_sec': f"{t_elapsed:.1f}",
-        })
+    summary_row = {
+        'run_id': run_id,
+        'well_name': 'ALL_WELLS',
+        'row_type': 'summary',
+        'seg_idx': '',
+        'md_start': '',
+        'md_end': '',
+        'end_shift': '',
+        'end_error': '',
+        'angle_deg': f"{angle_range:.1f}",
+        'pearson': '',
+        'baseline_error': f"{rmse_baseline:.2f}",
+        'opt_error': f"{rmse_opt:.2f}",
+        'n_segments': improved,
+        'prep_ms': '',
+        'opt_ms': '',
+        'total_ms': int(t_elapsed * 1000),
+        'started_at': run_started,
+        'finished_at': run_finished,
+    }
 
-        # Write CSV
-        csv_path = Path(__file__).parent / 'results' / 'full_well_stats.csv'
-        csv_path.parent.mkdir(exist_ok=True)
+    with open(csv_path, 'a', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=csv_header)
+        writer.writerow(summary_row)
 
-        file_exists = csv_path.exists()
-        with open(csv_path, 'a', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=csv_header)
-            if not file_exists:
-                writer.writeheader()
-            writer.writerows(csv_rows)
-
-        print(f"\nStats saved to: {csv_path}")
-
-    print()
+    print("-" * 70)
     print(f"Results (angle_range=±{angle_range}°):")
     print(f"  Baseline RMSE: {rmse_baseline:.2f}m")
     print(f"  Optimized RMSE: {rmse_opt:.2f}m")
     print(f"  Improvement: {rmse_baseline - rmse_opt:.2f}m ({100*(rmse_baseline-rmse_opt)/rmse_baseline:.1f}%)")
     print(f"  Wells improved: {improved}/100")
     print(f"  Time: {t_elapsed:.1f}s ({t_elapsed/100:.2f}s/well)")
+    print(f"  CSV: {csv_path}")
+    print(f"  Finished: {run_finished}")
+    sys.stdout.flush()
 
     return rmse_opt, improved
 
