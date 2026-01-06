@@ -307,6 +307,67 @@ def compute_overlap_metrics(
     }
 
 
+def compute_stitch_quality(
+    data: Dict[str, Any],
+    mode: str = None
+) -> Dict[str, float]:
+    """
+    Compute overlap quality metrics BEFORE stitching.
+
+    Uses same normalization as stitch_typewell_from_dataset but measures
+    Pearson and RMSE between TypeLog and PseudoTypeLog in overlap zone.
+
+    Args:
+        data: Well data from dataset
+        mode: 'OLD', 'NEW', or 'ORIGINAL' (default from env)
+
+    Returns:
+        Dict with pearson, rmse, overlap_length, and normalized GR ranges
+    """
+    if mode is None:
+        mode = os.getenv('NORMALIZATION_MODE', 'NEW')
+
+    norm_multiplier = data.get('norm_multiplier', 1.0)
+    if hasattr(norm_multiplier, 'item'):
+        norm_multiplier = norm_multiplier.item()
+
+    # Get raw data
+    pseudo_tvd = data['pseudo_tvd'].cpu().numpy() if hasattr(data['pseudo_tvd'], 'cpu') else np.array(data['pseudo_tvd'])
+    pseudo_gr = data['pseudo_gr'].cpu().numpy() if hasattr(data['pseudo_gr'], 'cpu') else np.array(data['pseudo_gr'])
+    type_tvd = data['type_tvd'].cpu().numpy() if hasattr(data['type_tvd'], 'cpu') else np.array(data['type_tvd'])
+    type_gr = data['type_gr'].cpu().numpy() if hasattr(data['type_gr'], 'cpu') else np.array(data['type_gr'])
+
+    # Apply same normalization as stitch_typewell_from_dataset
+    if mode == 'NEW':
+        # pseudo × mult, type raw
+        pseudo_gr_norm = pseudo_gr * norm_multiplier
+        type_gr_norm = type_gr.copy()
+    elif mode == 'OLD':
+        # pseudo raw, type × (1/mult)
+        pseudo_gr_norm = pseudo_gr.copy()
+        norm_coef = 1.0 / norm_multiplier if norm_multiplier != 0 else 1.0
+        type_gr_norm = type_gr * norm_coef
+    else:  # ORIGINAL
+        return {'pearson': np.nan, 'rmse': np.nan, 'overlap_length': 0, 'mode': mode}
+
+    # Compute metrics on normalized data
+    metrics = compute_overlap_metrics(type_tvd, type_gr_norm, pseudo_tvd, pseudo_gr_norm)
+
+    # Add RMSE (sqrt of MSE/10)
+    rmse = np.sqrt(metrics['mse'] / 10) if not np.isnan(metrics['mse']) else np.nan
+
+    return {
+        'pearson': metrics['pearson'],
+        'rmse': rmse,
+        'mse_x10': metrics['mse'],
+        'overlap_length': metrics['overlap_length'],
+        'overlap_start': metrics['overlap_start'],
+        'overlap_end': metrics['overlap_end'],
+        'mode': mode,
+        'norm_multiplier': norm_multiplier
+    }
+
+
 class TypewellProvider:
     """
     Unified typewell provider with multiple strategies.
