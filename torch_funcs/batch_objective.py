@@ -71,7 +71,9 @@ def batch_objective_function_torch(
     min_angle_diff=0.2,
     min_trend_deviation=0.5,
     trend_power=1.0,
-    reward_start_segment_idx=0
+    reward_start_segment_idx=0,
+    objective_mode='EVOTORCH',
+    mse_weight=0.1
 ):
     """
     Batch objective function for DE optimization.
@@ -241,15 +243,22 @@ def batch_objective_function_torch(
     else:
         intersections_component = torch.ones(batch_size, device=device, dtype=dtype)
 
-    # Combine metrics
-    pearson_component = 1 - pearson
-
-    # Calculate full metric (angle_sum_penalty and trend_penalty as soft constraints)
-    metric_values = (
-        (pearson_component ** pearson_power) *
-        (mse ** mse_power) *
-        (1.0 / intersections_component)
-    ) * (1 + angle_sum_penalty) * (1 + trend_penalty)
+    # Combine metrics based on objective_mode
+    if objective_mode == 'BRUTEFORCE':
+        # Formula from full_well_optimizer: loss = 2.0 - pearson + mse_weight * mse_norm
+        # pearson ∈ [-1, 1], so (2.0 - pearson) ∈ [1, 3] - always positive
+        # NO angle_sum_penalty - matching original full_well_optimizer behavior
+        gr_var = value_batch.var(dim=1)
+        mse_norm = mse / (gr_var + 1e-10)
+        metric_values = (2.0 - pearson) + mse_weight * mse_norm
+    else:
+        # EVOTORCH: original complex formula
+        pearson_component = 1 - pearson
+        metric_values = (
+            (pearson_component ** pearson_power) *
+            (mse ** mse_power) *
+            (1.0 / intersections_component)
+        ) * (1 + angle_sum_penalty) * (1 + trend_penalty)
 
     # Apply angle violation penalty (exponential)
     metric_values = metric_values * (1 + angle_violation_penalty)
@@ -405,7 +414,9 @@ class TorchObjectiveWrapper:
         min_angle_diff=0.2,
         min_trend_deviation=0.5,
         trend_power=1.0,
-        reward_start_segment_idx=0
+        reward_start_segment_idx=0,
+        objective_mode='EVOTORCH',
+        mse_weight=0.1
     ):
         """
         Initialize wrapper with static data.
@@ -460,6 +471,10 @@ class TorchObjectiveWrapper:
         # Telescope mode: skip first segment(s) in Pearson/MSE reward
         self.reward_start_segment_idx = reward_start_segment_idx
 
+        # Objective mode: 'EVOTORCH' (complex) or 'BRUTEFORCE' (pearson - mse_weight * mse_norm)
+        self.objective_mode = objective_mode
+        self.mse_weight = mse_weight
+
     def __call__(self, shifts_batch):
         """
         Evaluate batch of shift configurations.
@@ -497,7 +512,9 @@ class TorchObjectiveWrapper:
             self.min_angle_diff,
             self.min_trend_deviation,
             self.trend_power,
-            self.reward_start_segment_idx
+            self.reward_start_segment_idx,
+            self.objective_mode,
+            self.mse_weight
         )
 
     def evaluate_single(self, shifts):

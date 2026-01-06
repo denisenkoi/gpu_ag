@@ -31,6 +31,20 @@ from smart_segmenter import SmartSegmenter
 from peak_detectors import OtsuPeakDetector, RegionFinder
 from numpy_funcs.interpretation import interpolate_shift_at_md
 from cpu_baseline.typewell_provider import stitch_typewell_from_dataset, compute_overlap_metrics
+import pandas as pd
+
+# Load SC baseline from CSV (once at module load)
+_SC_BASELINE_PATH = Path(__file__).parent / 'results' / 'self_correlation_baseline.csv'
+_SC_BASELINE_CACHE = {}
+
+def get_sc_landing_rmse(well_name: str) -> float:
+    """Get sc_landing_rmse for a well from cached CSV."""
+    global _SC_BASELINE_CACHE
+    if not _SC_BASELINE_CACHE:
+        if _SC_BASELINE_PATH.exists():
+            df = pd.read_csv(_SC_BASELINE_PATH)
+            _SC_BASELINE_CACHE = dict(zip(df['well_name'], df['gr_var_mean']))
+    return _SC_BASELINE_CACHE.get(well_name, 4.0)  # Default to median ~4%
 
 # Read typewell mode from env
 # NEW = correct: TypeLog raw (reference), PseudoTypeLog × mult, Well GR × mult
@@ -38,6 +52,61 @@ from cpu_baseline.typewell_provider import stitch_typewell_from_dataset, compute
 NORMALIZATION_MODE = os.getenv('NORMALIZATION_MODE', 'NEW')
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+# GPU configurations
+GPU_CONFIGS = {
+    '3090': {'chunk_size': 250000, 'min_free_gb': 19},
+    '5090': {'chunk_size': 500000, 'min_free_gb': 29},
+    'default': {'chunk_size': 250000, 'min_free_gb': 10},
+}
+
+
+def detect_gpu_model() -> str:
+    """Detect GPU model (3090 or 5090)."""
+    if not torch.cuda.is_available():
+        return 'default'
+    name = torch.cuda.get_device_name(0).lower()
+    if '5090' in name:
+        return '5090'
+    elif '3090' in name:
+        return '3090'
+    return 'default'
+
+
+def get_gpu_free_memory_gb() -> float:
+    """Get free GPU memory in GB."""
+    if not torch.cuda.is_available():
+        return 0.0
+    free, total = torch.cuda.mem_get_info(0)
+    return free / (1024 ** 3)
+
+
+def check_gpu_memory(gpu_model: str = None) -> bool:
+    """
+    Check if GPU has enough free memory for optimization.
+    Returns True if OK, raises RuntimeError if not enough memory.
+    """
+    if gpu_model is None:
+        gpu_model = detect_gpu_model()
+
+    config = GPU_CONFIGS.get(gpu_model, GPU_CONFIGS['default'])
+    min_free_gb = config['min_free_gb']
+    free_gb = get_gpu_free_memory_gb()
+
+    if free_gb < min_free_gb:
+        raise RuntimeError(
+            f"Not enough GPU memory! GPU={gpu_model}, "
+            f"free={free_gb:.1f}GB, required={min_free_gb}GB. "
+            f"Check for other processes using the GPU."
+        )
+    return True
+
+
+def get_chunk_size(gpu_model: str = None) -> int:
+    """Get optimal chunk_size for detected GPU."""
+    if gpu_model is None:
+        gpu_model = detect_gpu_model()
+    return GPU_CONFIGS.get(gpu_model, GPU_CONFIGS['default'])['chunk_size']
 
 
 @dataclass
@@ -49,6 +118,90 @@ class OptimizedSegment:
     end_shift: float
     angle_deg: float
     pearson: float
+
+
+def compute_sc_penalty_gpu(
+    tvt: torch.Tensor,  # [n_combos, n_points]
+    zone_gr: torch.Tensor,  # [n_points]
+    sc_landing_rmse: float,
+    bin_size: float = 0.1,  # 10cm bins for SC (larger than 5cm for memory)
+    min_bins_threshold: int = 5,  # Minimum overlap bins for reliable SC
+    device: str = DEVICE,
+) -> torch.Tensor:
+    """
+    Compute self-correlation penalty on GPU using scatter operations.
+
+    Returns: sc_penalty tensor [n_combos]
+    """
+    n_combos, n_points = tvt.shape
+
+    # Normalize GR to 0-100% (same as baseline calculation)
+    gr_min = zone_gr.min()
+    gr_max = zone_gr.max()
+    gr_range = gr_max - gr_min
+    if gr_range < 1e-6:
+        return torch.zeros(n_combos, device=device, dtype=tvt.dtype)
+    zone_gr_norm = (zone_gr - gr_min) / gr_range * 100.0
+
+    # Bin indices
+    tvt_min = tvt.min()
+    tvt_max = tvt.max()
+    tvt_range = tvt_max - tvt_min
+
+    if tvt_range < bin_size:
+        return torch.zeros(n_combos, device=device, dtype=tvt.dtype)
+
+    n_bins = int(tvt_range / bin_size) + 1
+
+    # Limit bins to avoid OOM (max ~500 bins = 50m range)
+    if n_bins > 500:
+        bin_size = tvt_range / 500
+        n_bins = 500
+
+    bin_idx = ((tvt - tvt_min) / bin_size).long()
+    bin_idx = torch.clamp(bin_idx, 0, n_bins - 1)
+
+    # Flat index for scatter: combo_idx * n_bins + bin_idx
+    combo_idx = torch.arange(n_combos, device=device).unsqueeze(1)
+    flat_bin_idx = (combo_idx * n_bins + bin_idx).reshape(-1)
+
+    # Expand normalized GR for all combos
+    zone_gr_expanded = zone_gr_norm.unsqueeze(0).expand(n_combos, -1).reshape(-1)
+
+    # Accumulate sum, sum_sq, count via scatter_add
+    total_bins = n_combos * n_bins
+    sum_gr = torch.zeros(total_bins, device=device, dtype=tvt.dtype)
+    sum_gr_sq = torch.zeros(total_bins, device=device, dtype=tvt.dtype)
+    count = torch.zeros(total_bins, device=device, dtype=tvt.dtype)
+
+    sum_gr.scatter_add_(0, flat_bin_idx, zone_gr_expanded)
+    sum_gr_sq.scatter_add_(0, flat_bin_idx, zone_gr_expanded ** 2)
+    count.scatter_add_(0, flat_bin_idx, torch.ones_like(zone_gr_expanded))
+
+    # Reshape to [n_combos, n_bins]
+    sum_gr = sum_gr.reshape(n_combos, n_bins)
+    sum_gr_sq = sum_gr_sq.reshape(n_combos, n_bins)
+    count = count.reshape(n_combos, n_bins)
+
+    # Variance in bins with count >= 2
+    mask = count >= 2
+    mean_gr = torch.where(mask, sum_gr / (count + 1e-10), torch.zeros_like(sum_gr))
+    var_gr = torch.where(mask, sum_gr_sq / (count + 1e-10) - mean_gr ** 2, torch.zeros_like(sum_gr))
+    var_gr = torch.clamp(var_gr, min=0)  # Numerical stability
+
+    # RMSE = sqrt(mean(var)) for bins with count >= 2
+    n_valid_bins = mask.sum(dim=1)
+    sum_var = (var_gr * mask.float()).sum(dim=1)
+    mean_var = torch.where(n_valid_bins > 0, sum_var / n_valid_bins, torch.zeros_like(sum_var))
+    sc_rmse = torch.sqrt(mean_var)
+
+    # SC penalty = max(sc_rmse - baseline, 0)
+    sc_penalty = torch.clamp(sc_rmse - sc_landing_rmse, min=0)
+
+    # Zero penalty if too few overlap bins
+    sc_penalty = torch.where(n_valid_bins >= min_bins_threshold, sc_penalty, torch.zeros_like(sc_penalty))
+
+    return sc_penalty
 
 
 def optimize_segment_block_gpu(
@@ -65,14 +218,20 @@ def optimize_segment_block_gpu(
     angle_step: float = 0.2,
     pearson_power: float = 1.0,
     pearson_clamp: float = 0.0,
+    mse_weight: float = 0.1,  # Weight for MSE in score formula
+    sc_weight: float = 0.0,  # Weight for SC penalty (0 = disabled)
+    sc_landing_rmse: float = 4.0,  # Baseline SC RMSE from landing zone
     device: str = DEVICE,
-    chunk_size: int = 250000,
+    chunk_size: int = None,  # Auto-detect based on GPU model
 ) -> Tuple[float, float, np.ndarray, float]:
     """
     GPU optimization for a block of segments.
 
     Returns: (best_pearson, best_end_shift, best_angles, best_start_shift)
     """
+    if chunk_size is None:
+        chunk_size = get_chunk_size()
+
     n_seg = len(segment_indices)
 
     # Generate angle candidates
@@ -147,8 +306,9 @@ def optimize_segment_block_gpu(
             end_shifts[:, :-1]
         ], dim=1)
 
-        # Build synthetic
+        # Build synthetic and TVT
         synthetic = torch.zeros((chunk_n, n_points), device=device, dtype=GPU_DTYPE)
+        all_tvt = torch.zeros((chunk_n, n_points), device=device, dtype=GPU_DTYPE) if sc_weight > 0 else None
 
         for seg_i, (local_start, local_end, seg_n, seg_tvd, ratio) in enumerate(seg_data):
             seg_start = start_shifts[:, seg_i:seg_i+1]
@@ -157,6 +317,10 @@ def optimize_segment_block_gpu(
 
             tvt = seg_tvd.unsqueeze(0) - seg_shifts
             tvt_clamped = torch.clamp(tvt, type_tvd_t[0], type_tvd_t[-1])
+
+            # Store TVT for SC penalty
+            if all_tvt is not None:
+                all_tvt[:, local_start:local_end] = tvt
 
             indices = torch.searchsorted(type_tvd_t, tvt_clamped.reshape(-1))
             indices = torch.clamp(indices, 1, len(type_tvd_t) - 1)
@@ -176,10 +340,21 @@ def optimize_segment_block_gpu(
         denom = torch.sqrt(zone_gr_ss * (synthetic_centered**2).sum(dim=1))
         pearsons = torch.where(denom > 1e-10, numer / denom, torch.zeros_like(numer))
 
-        # Score: pearson - 0.1 * MSE_norm (best formula so far)
+        # Score: pearson - mse_weight * MSE_norm - sc_weight * sc_penalty
         mse = ((zone_gr - synthetic)**2).mean(dim=1)
         mse_norm = mse / (zone_gr.var() + 1e-10)
-        scores = pearsons - 0.1 * mse_norm
+
+        # SC penalty (if enabled)
+        if sc_weight > 0 and all_tvt is not None:
+            sc_penalty = compute_sc_penalty_gpu(
+                all_tvt, zone_gr, sc_landing_rmse,
+                bin_size=0.1,  # 10cm bins
+                min_bins_threshold=5,
+                device=device
+            )
+            scores = pearsons - mse_weight * mse_norm - sc_weight * sc_penalty
+        else:
+            scores = pearsons - mse_weight * mse_norm
 
         chunk_best_idx = torch.argmax(scores).item()
         chunk_best_score = scores[chunk_best_idx].item()
@@ -196,6 +371,236 @@ def optimize_segment_block_gpu(
     best_end_shift = best_start_shift + np.sum(best_shift_deltas)
 
     return best_pearson, best_end_shift, best_angles, best_start_shift
+
+
+def optimize_segment_block_evolutionary(
+    segment_indices: List[Tuple[int, int]],
+    start_shift: float,
+    trajectory_angle: float,
+    well_md: np.ndarray,
+    well_tvd: np.ndarray,
+    well_gr: np.ndarray,
+    type_tvd: np.ndarray,
+    type_gr: np.ndarray,
+    tvd_shift: float,
+    angle_range: float = 1.5,
+    mse_weight: float = 0.1,
+    device: str = DEVICE,
+    algorithm: str = 'CMAES',  # CMAES or SNES
+    popsize: int = 100,
+    maxiter: int = 50,
+) -> Tuple[float, float, np.ndarray, float]:
+    """
+    Evolutionary optimization (CMA-ES/SNES) for a block of segments.
+    Uses soft exponential penalty for angle constraint instead of hard bounds.
+
+    Returns: (best_pearson, best_end_shift, best_angles, best_start_shift)
+    """
+    from evotorch import Problem
+    from evotorch.algorithms import CMAES, SNES
+
+    n_seg = len(segment_indices)
+
+    # Segment MD lengths
+    seg_md_lens = np.array([well_md[e] - well_md[s] for s, e in segment_indices], dtype=np.float32)
+    seg_md_lens_t = torch.tensor(seg_md_lens, device=device, dtype=GPU_DTYPE)
+
+    # Zone data
+    start_idx = segment_indices[0][0]
+    end_idx = segment_indices[-1][1]
+    n_points = end_idx - start_idx
+
+    zone_tvd = torch.tensor(well_tvd[start_idx:end_idx], device=device, dtype=GPU_DTYPE)
+    zone_gr = torch.tensor(well_gr[start_idx:end_idx], device=device, dtype=GPU_DTYPE)
+    zone_gr_centered = zone_gr - zone_gr.mean()
+    zone_gr_ss = (zone_gr_centered**2).sum()
+    zone_gr_var = zone_gr.var()
+
+    type_tvd_t = torch.tensor(type_tvd + tvd_shift, device=device, dtype=GPU_DTYPE)
+    type_gr_t = torch.tensor(type_gr, device=device, dtype=GPU_DTYPE)
+
+    # Precompute segment data
+    seg_data = []
+    for seg_i, (s_idx, e_idx) in enumerate(segment_indices):
+        local_start = s_idx - start_idx
+        local_end = e_idx - start_idx
+        seg_n = local_end - local_start
+        seg_tvd = torch.tensor(well_tvd[s_idx:e_idx], device=device, dtype=GPU_DTYPE)
+
+        md_start = well_md[s_idx]
+        md_end = well_md[e_idx - 1] if e_idx > s_idx else md_start
+        if md_end > md_start:
+            ratio = torch.tensor((well_md[s_idx:e_idx] - md_start) / (md_end - md_start),
+                                device=device, dtype=GPU_DTYPE)
+        else:
+            ratio = torch.zeros(seg_n, device=device, dtype=GPU_DTYPE)
+
+        seg_data.append((local_start, local_end, seg_n, seg_tvd, ratio))
+
+    def objective_fn(angles_batch: torch.Tensor) -> torch.Tensor:
+        """
+        Compute objective for a batch of angle combinations.
+        angles_batch: (batch, n_seg) or (n_seg,) - angles in degrees, centered at trajectory_angle
+        Returns: (batch,) or scalar - loss values (lower is better)
+        """
+        # Handle single solution (evotorch sometimes passes 1D tensor)
+        squeeze_output = False
+        if angles_batch.dim() == 1:
+            angles_batch = angles_batch.unsqueeze(0)
+            squeeze_output = True
+
+        batch_size = angles_batch.shape[0]
+
+        # Angles are relative to trajectory_angle, convert to absolute
+        abs_angles = angles_batch + trajectory_angle
+
+        # Exponential penalty for angle violations: 1e6 * 100^max_excess
+        angle_excess = torch.abs(angles_batch) - angle_range
+        max_excess = torch.clamp(torch.max(angle_excess, dim=1).values, min=0.0)
+        angle_penalty = torch.where(
+            max_excess > 0,
+            1e6 * torch.pow(torch.tensor(100.0, device=device, dtype=GPU_DTYPE), max_excess),
+            torch.zeros(batch_size, device=device, dtype=GPU_DTYPE)
+        )
+
+        # Compute shifts from angles
+        shift_deltas = torch.tan(torch.deg2rad(abs_angles)) * seg_md_lens_t
+        cumsum = torch.cumsum(shift_deltas, dim=1)
+        start_shift_t = torch.tensor(start_shift, device=device, dtype=GPU_DTYPE)
+        end_shifts = start_shift_t + cumsum
+        start_shifts = torch.cat([
+            start_shift_t.expand(batch_size, 1),
+            end_shifts[:, :-1]
+        ], dim=1)
+
+        # Build synthetic GR
+        synthetic = torch.zeros((batch_size, n_points), device=device, dtype=GPU_DTYPE)
+
+        for seg_i, (local_start, local_end, seg_n, seg_tvd, ratio) in enumerate(seg_data):
+            seg_start = start_shifts[:, seg_i:seg_i+1]
+            seg_end = end_shifts[:, seg_i:seg_i+1]
+            seg_shifts = seg_start + ratio.unsqueeze(0) * (seg_end - seg_start)
+
+            tvt = seg_tvd.unsqueeze(0) - seg_shifts
+            tvt_clamped = torch.clamp(tvt, type_tvd_t[0], type_tvd_t[-1])
+
+            indices = torch.searchsorted(type_tvd_t, tvt_clamped.reshape(-1))
+            indices = torch.clamp(indices, 1, len(type_tvd_t) - 1)
+
+            tvd_low = type_tvd_t[indices - 1]
+            tvd_high = type_tvd_t[indices]
+            gr_low = type_gr_t[indices - 1]
+            gr_high = type_gr_t[indices]
+
+            t = (tvt_clamped.reshape(-1) - tvd_low) / (tvd_high - tvd_low + 1e-10)
+            interp_gr = gr_low + t * (gr_high - gr_low)
+            synthetic[:, local_start:local_end] = interp_gr.reshape(batch_size, seg_n)
+
+        # Pearson correlation
+        synthetic_centered = synthetic - synthetic.mean(dim=1, keepdim=True)
+        numer = (zone_gr_centered * synthetic_centered).sum(dim=1)
+        denom = torch.sqrt(zone_gr_ss * (synthetic_centered**2).sum(dim=1))
+        pearsons = torch.where(denom > 1e-10, numer / denom, torch.zeros(batch_size, device=device, dtype=GPU_DTYPE))
+
+        # MSE normalized
+        mse = ((zone_gr - synthetic)**2).mean(dim=1)
+        mse_norm = mse / (zone_gr_var + 1e-10)
+
+        # Score (maximize) -> Loss (minimize)
+        # Original: score = pearson - mse_weight * mse_norm
+        # Loss = -score + angle_penalty
+        loss = -pearsons + mse_weight * mse_norm + angle_penalty
+
+        if squeeze_output:
+            return loss.squeeze(0)
+        return loss
+
+    # Define EvoTorch Problem
+    class BlockOptProblem(Problem):
+        def __init__(self):
+            super().__init__(
+                objective_func=self._evaluate,
+                objective_sense='min',
+                solution_length=n_seg,
+                initial_bounds=(-angle_range, angle_range),
+                device=device,
+                dtype=GPU_DTYPE,
+            )
+
+        def _evaluate(self, solutions):
+            x = solutions.values
+            fitness = objective_fn(x)
+            solutions.set_evals(fitness)
+
+    problem = BlockOptProblem()
+
+    # Select algorithm
+    if algorithm.upper() == 'SNES':
+        searcher = SNES(problem, popsize=popsize, stdev_init=angle_range / 2)
+    else:  # CMAES
+        searcher = CMAES(problem, popsize=popsize, stdev_init=angle_range / 2)
+
+    # Run optimization and track best
+    best_fun = float('inf')
+    best_angles_relative = None
+
+    for _ in range(maxiter):
+        searcher.step()
+        # Get population and find best
+        pop = searcher.population
+        if pop is not None and len(pop) > 0:
+            best_idx = pop.evals.argmin()
+            current_fun = pop.evals[best_idx].item()
+            if current_fun < best_fun:
+                best_fun = current_fun
+                best_angles_relative = pop.values[best_idx].cpu().numpy()
+
+    if best_angles_relative is None:
+        # Fallback: use center of distribution
+        best_angles_relative = np.zeros(n_seg)
+
+    best_angles = best_angles_relative + trajectory_angle
+
+    # Compute final values
+    best_shift_deltas = np.tan(np.radians(best_angles)) * seg_md_lens
+    best_end_shift = start_shift + np.sum(best_shift_deltas)
+
+    # Compute pearson for best solution
+    with torch.no_grad():
+        loss = objective_fn(torch.tensor(best_angles_relative, device=device, dtype=GPU_DTYPE).unsqueeze(0))
+        # Approximate pearson from loss (without penalty)
+        abs_angles_t = torch.tensor(best_angles, device=device, dtype=GPU_DTYPE).unsqueeze(0)
+        shift_deltas_t = torch.tan(torch.deg2rad(abs_angles_t)) * seg_md_lens_t
+        cumsum = torch.cumsum(shift_deltas_t, dim=1)
+        end_shifts = start_shift + cumsum
+        start_shifts_t = torch.cat([
+            torch.tensor([[start_shift]], device=device, dtype=GPU_DTYPE),
+            end_shifts[:, :-1]
+        ], dim=1)
+
+        synthetic = torch.zeros((1, n_points), device=device, dtype=GPU_DTYPE)
+        for seg_i, (local_start, local_end, seg_n, seg_tvd, ratio) in enumerate(seg_data):
+            seg_start = start_shifts_t[:, seg_i:seg_i+1]
+            seg_end = end_shifts[:, seg_i:seg_i+1]
+            seg_shifts = seg_start + ratio.unsqueeze(0) * (seg_end - seg_start)
+            tvt = seg_tvd.unsqueeze(0) - seg_shifts
+            tvt_clamped = torch.clamp(tvt, type_tvd_t[0], type_tvd_t[-1])
+            indices = torch.searchsorted(type_tvd_t, tvt_clamped.reshape(-1))
+            indices = torch.clamp(indices, 1, len(type_tvd_t) - 1)
+            tvd_low = type_tvd_t[indices - 1]
+            tvd_high = type_tvd_t[indices]
+            gr_low = type_gr_t[indices - 1]
+            gr_high = type_gr_t[indices]
+            t = (tvt_clamped.reshape(-1) - tvd_low) / (tvd_high - tvd_low + 1e-10)
+            interp_gr = gr_low + t * (gr_high - gr_low)
+            synthetic[:, local_start:local_end] = interp_gr.reshape(1, seg_n)
+
+        synthetic_centered = synthetic - synthetic.mean(dim=1, keepdim=True)
+        numer = (zone_gr_centered * synthetic_centered).sum(dim=1)
+        denom = torch.sqrt(zone_gr_ss * (synthetic_centered**2).sum(dim=1))
+        best_pearson = (numer / (denom + 1e-10)).item()
+
+    return best_pearson, best_end_shift, best_angles, start_shift
 
 
 def get_segment_boundaries(
@@ -313,10 +718,16 @@ def optimize_full_well(
     angle_step: float = 0.2,
     pearson_power: float = 1.0,
     pearson_clamp: float = 0.0,
+    mse_weight: float = 0.1,  # Weight for MSE in score formula
+    sc_weight: float = 0.0,  # Weight for SC penalty (0 = disabled)
     segments_per_block: int = 5,
     end_zone_angle_reduction: float = 0.5,  # Reduce angle_range near end
     start_from_landing: bool = True,  # Start from landing_end_87_200 instead of OTSU
     verbose: bool = False,
+    algorithm: str = 'BRUTEFORCE',  # BRUTEFORCE, CMAES, or SNES
+    evo_popsize: int = 100,  # Population size for evolutionary algorithms
+    evo_maxiter: int = 50,  # Max iterations for evolutionary algorithms
+    chunk_size: int = None,  # Auto-detect based on GPU model
 ) -> List[OptimizedSegment]:
     """
     Optimize entire well from landing point to end using PELT-based segmentation.
@@ -445,16 +856,37 @@ def optimize_full_well(
         # Use trend angle (from landing to zone_start) instead of local block angle
         traj_angle = trend_angle
 
+        # Get SC baseline for this well
+        sc_landing_rmse = get_sc_landing_rmse(well_name) if sc_weight > 0 else 4.0
+
         # Optimize block
-        pearson, end_shift, best_angles, _ = optimize_segment_block_gpu(
-            seg_indices, current_shift, traj_angle,
-            well_md, well_tvd, well_gr,
-            type_tvd, type_gr, tvd_shift,
-            angle_range=effective_angle_range,
-            angle_step=angle_step,
-            pearson_power=pearson_power,
-            pearson_clamp=pearson_clamp,
-        )
+        if algorithm.upper() in ('CMAES', 'SNES'):
+            # Evolutionary optimization
+            pearson, end_shift, best_angles, _ = optimize_segment_block_evolutionary(
+                seg_indices, current_shift, traj_angle,
+                well_md, well_tvd, well_gr,
+                type_tvd, type_gr, tvd_shift,
+                angle_range=effective_angle_range,
+                mse_weight=mse_weight,
+                algorithm=algorithm.upper(),
+                popsize=evo_popsize,
+                maxiter=evo_maxiter,
+            )
+        else:
+            # Brute-force (default)
+            pearson, end_shift, best_angles, _ = optimize_segment_block_gpu(
+                seg_indices, current_shift, traj_angle,
+                well_md, well_tvd, well_gr,
+                type_tvd, type_gr, tvd_shift,
+                angle_range=effective_angle_range,
+                angle_step=angle_step,
+                pearson_power=pearson_power,
+                pearson_clamp=pearson_clamp,
+                mse_weight=mse_weight,
+                sc_weight=sc_weight,
+                sc_landing_rmse=sc_landing_rmse,
+                chunk_size=chunk_size,
+            )
 
         # Build segments from result
         seg_md_lens = np.array([well_md[e] - well_md[s] for s, e in seg_indices])
@@ -704,9 +1136,32 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True):
 
 if __name__ == '__main__':
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == '--all':
-        # Test with angle_range=1.5 (best results)
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Full well GPU optimizer')
+    parser.add_argument('--all', action='store_true', help='Test all 100 wells')
+    parser.add_argument('--angle-range', type=float, default=1.5, help='Angle range in degrees')
+    parser.add_argument('--angle-step', type=float, default=0.2, help='Angle step in degrees')
+    parser.add_argument('--chunk-size', type=int, default=None, help='Override chunk size')
+    parser.add_argument('--skip-memory-check', action='store_true', help='Skip GPU memory check')
+    args = parser.parse_args()
+
+    # Detect GPU and check memory
+    gpu_model = detect_gpu_model()
+    chunk_size = args.chunk_size or get_chunk_size(gpu_model)
+    free_gb = get_gpu_free_memory_gb()
+
+    print(f"GPU: {gpu_model}, Free memory: {free_gb:.1f}GB, chunk_size: {chunk_size}")
+
+    if not args.skip_memory_check:
+        try:
+            check_gpu_memory(gpu_model)
+        except RuntimeError as e:
+            print(f"ERROR: {e}")
+            sys.exit(1)
+
+    if args.all:
         print("\n" + "="*70)
-        test_all_wells(angle_range=1.5)
+        test_all_wells(angle_range=args.angle_range)
     else:
         test_single_well()
