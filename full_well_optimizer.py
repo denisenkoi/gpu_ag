@@ -49,6 +49,9 @@ def get_sc_landing_rmse(well_name: str) -> float:
 # Read typelog mode from env
 USE_PSEUDO_TYPELOG = os.getenv('USE_PSEUDO_TYPELOG', 'True').lower() in ('true', '1', 'yes')
 
+# SC (Self-Correlation) penalty - DISABLED for now (expensive, not proven useful)
+SC_ENABLED = False
+
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # GPU configurations
@@ -305,7 +308,7 @@ def optimize_segment_block_gpu(
 
         # Build synthetic and TVT
         synthetic = torch.zeros((chunk_n, n_points), device=device, dtype=GPU_DTYPE)
-        all_tvt = torch.zeros((chunk_n, n_points), device=device, dtype=GPU_DTYPE) if sc_weight > 0 else None
+        all_tvt = torch.zeros((chunk_n, n_points), device=device, dtype=GPU_DTYPE) if SC_ENABLED and sc_weight > 0 else None
 
         for seg_i, (local_start, local_end, seg_n, seg_tvd, ratio) in enumerate(seg_data):
             seg_start = start_shifts[:, seg_i:seg_i+1]
@@ -342,7 +345,7 @@ def optimize_segment_block_gpu(
         mse_norm = mse / (zone_gr.var() + 1e-10)
 
         # SC penalty (if enabled)
-        if sc_weight > 0 and all_tvt is not None:
+        if SC_ENABLED and sc_weight > 0 and all_tvt is not None:
             sc_penalty = compute_sc_penalty_gpu(
                 all_tvt, zone_gr, sc_landing_rmse,
                 bin_size=0.1,  # 10cm bins
@@ -855,7 +858,7 @@ def optimize_full_well(
         traj_angle = trend_angle
 
         # Get SC baseline for this well
-        sc_landing_rmse = get_sc_landing_rmse(well_name) if sc_weight > 0 else 4.0
+        sc_landing_rmse = get_sc_landing_rmse(well_name) if SC_ENABLED and sc_weight > 0 else 4.0
 
         # Optimize block
         if algorithm.upper() in ('CMAES', 'SNES'):
