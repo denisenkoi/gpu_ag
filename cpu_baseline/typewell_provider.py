@@ -211,32 +211,51 @@ def stitch_typewell_from_dataset(
     type_tvd = data['type_tvd'].cpu().numpy() if hasattr(data['type_tvd'], 'cpu') else np.array(data['type_tvd'])
     type_gr = data['type_gr'].cpu().numpy() if hasattr(data['type_gr'], 'cpu') else np.array(data['type_gr'])
 
+    # Get tvd_shift for coordinate alignment
+    tvd_shift = data.get('tvd_typewell_shift', 0.0)
+    if hasattr(tvd_shift, 'item'):
+        tvd_shift = tvd_shift.item()
+
     # ORIGINAL mode: pure typeLog without stitching
     if mode == 'ORIGINAL':
         logger.debug(f"Using ORIGINAL typeLog (no pseudo stitching), {len(type_tvd)} points")
         result_tvd = type_tvd
         result_gr = type_gr
     else:
+        # Apply normalization to GR values
+        if mode == 'NEW':
+            # NEW: pseudo × mult, type raw
+            pseudo_gr_norm = pseudo_gr * norm_multiplier if norm_multiplier != 1.0 else pseudo_gr
+            type_gr_norm = type_gr.copy()
+        else:
+            # OLD: pseudo raw, type × (1/mult)
+            pseudo_gr_norm = pseudo_gr.copy()
+            norm_coef = 1.0 / norm_multiplier if norm_multiplier != 0 else 1.0
+            type_gr_norm = type_gr * norm_coef
+
+        # === METRICS BEFORE STITCHING (after normalization AND shift) ===
+        # Apply tvd_shift to type_tvd for correct coordinate alignment
+        type_tvd_shifted = type_tvd + tvd_shift
+
+        # Measure overlap quality between SHIFTED type and pseudo
+        metrics = compute_overlap_metrics(type_tvd_shifted, type_gr_norm, pseudo_tvd, pseudo_gr_norm)
+        logger.info(f"PRE-STITCH metrics: tvd_shift={tvd_shift:.1f}, "
+                    f"type_tvd_shifted=[{type_tvd_shifted.min():.0f}-{type_tvd_shifted.max():.0f}], "
+                    f"pseudo_tvd=[{pseudo_tvd.min():.0f}-{pseudo_tvd.max():.0f}], "
+                    f"overlap={metrics['overlap_length']:.0f}m, "
+                    f"pearson={metrics['pearson']:.3f}, rmse={np.sqrt(metrics['mse']/10):.2f}")
+
         # Build dict format for extend_pseudo_with_typelog
         pseudo_dict = {
             'tvdSortedPoints': [{'trueVerticalDepth': float(tvd), 'data': float(gr)}
-                               for tvd, gr in zip(pseudo_tvd, pseudo_gr)]
+                               for tvd, gr in zip(pseudo_tvd, pseudo_gr_norm)]
         }
         type_dict = {
             'tvdSortedPoints': [{'trueVerticalDepth': float(tvd), 'data': float(gr)}
-                               for tvd, gr in zip(type_tvd, type_gr)]
+                               for tvd, gr in zip(type_tvd, type_gr_norm)]
         }
 
-        if mode == 'NEW':
-            # NEW: pseudo × mult, type raw
-            if norm_multiplier != 1.0:
-                for p in pseudo_dict['tvdSortedPoints']:
-                    p['data'] *= norm_multiplier
-            stitched = extend_pseudo_with_typelog(pseudo_dict, type_dict, norm_coef=1.0)
-        else:
-            # OLD: pseudo raw, type × (1/mult)
-            norm_coef = 1.0 / norm_multiplier if norm_multiplier != 0 else 1.0
-            stitched = extend_pseudo_with_typelog(pseudo_dict, type_dict, norm_coef=norm_coef)
+        stitched = extend_pseudo_with_typelog(pseudo_dict, type_dict, norm_coef=1.0)
 
         points = stitched.get('tvdSortedPoints', [])
         result_tvd = np.array([p['trueVerticalDepth'] for p in points])
