@@ -225,6 +225,7 @@ def optimize_segment_block_gpu(
     sc_landing_rmse: float = 4.0,  # Baseline SC RMSE from landing zone
     device: str = DEVICE,
     chunk_size: int = None,  # Auto-detect based on GPU model
+    tvd_shift: float = 0.0,  # TVD shift for TypeLog coordinate alignment
 ) -> Tuple[float, float, np.ndarray, float]:
     """
     GPU optimization for a block of segments.
@@ -266,7 +267,7 @@ def optimize_segment_block_gpu(
     zone_gr_centered = zone_gr - zone_gr.mean()
     zone_gr_ss = (zone_gr_centered**2).sum()
 
-    type_tvd_t = torch.tensor(type_tvd, device=device, dtype=GPU_DTYPE)  # Already in well coordinates
+    type_tvd_t = torch.tensor(type_tvd + tvd_shift, device=device, dtype=GPU_DTYPE)  # Apply tvd_shift for coordinate alignment
     type_gr_t = torch.tensor(type_gr, device=device, dtype=GPU_DTYPE)
 
     # Precompute segment data
@@ -398,6 +399,7 @@ def optimize_segment_block_evolutionary(
     algorithm: str = 'CMAES',  # CMAES or SNES
     popsize: int = 100,
     maxiter: int = 50,
+    tvd_shift: float = 0.0,  # TVD shift for TypeLog coordinate alignment
 ) -> Tuple[float, float, np.ndarray, float]:
     """
     Evolutionary optimization (CMA-ES/SNES) for a block of segments.
@@ -425,7 +427,7 @@ def optimize_segment_block_evolutionary(
     zone_gr_ss = (zone_gr_centered**2).sum()
     zone_gr_var = zone_gr.var()
 
-    type_tvd_t = torch.tensor(type_tvd, device=device, dtype=GPU_DTYPE)  # Already in well coordinates
+    type_tvd_t = torch.tensor(type_tvd + tvd_shift, device=device, dtype=GPU_DTYPE)  # Apply tvd_shift for coordinate alignment
     type_gr_t = torch.tensor(type_gr, device=device, dtype=GPU_DTYPE)
 
     # Precompute segment data
@@ -768,12 +770,19 @@ def optimize_full_well(
     log_md = well_data['log_md'].numpy()
     log_gr = well_data['log_gr'].numpy()
 
-    # Get typewell with correct coordinate alignment (tvd_shift applied BEFORE stitching)
+    # Get typewell (tvd_shift will be applied in optimizer, not here)
     type_tvd, type_gr, typelog_meta = prepare_typelog(
         well_data,
         use_pseudo=USE_PSEUDO_TYPELOG,
         apply_smoothing=True
     )
+
+    # tvd_shift: for stitched mode it's 0 (OLD behavior that gave RMSE=4.17m)
+    # TypeLog and ref_shift are both computed without tvd_shift correction
+    if USE_PSEUDO_TYPELOG:
+        tvd_shift = 0.0  # Match OLD behavior
+    else:
+        tvd_shift = typelog_meta['tvd_shift']
 
     # Interpolate GR to well_md and apply same normalization as TypeLog
     well_gr = np.interp(well_md, log_md, log_gr)
@@ -882,6 +891,7 @@ def optimize_full_well(
                 algorithm=algorithm.upper(),
                 popsize=evo_popsize,
                 maxiter=evo_maxiter,
+                tvd_shift=tvd_shift,
             )
         else:
             # Brute-force (default)
@@ -897,6 +907,7 @@ def optimize_full_well(
                 sc_weight=sc_weight,
                 sc_landing_rmse=sc_landing_rmse,
                 chunk_size=chunk_size,
+                tvd_shift=tvd_shift,
             )
 
         # Build segments from result
@@ -988,14 +999,24 @@ def test_single_well(well_name: str = "Well1221~EGFDL"):
         print(f"Time: {t1-t0:.1f}s")
 
 
-def test_all_wells(angle_range: float = 1.5, save_csv: bool = True):
+def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter: list = None):
     """Test on all 100 wells with CSV export after each well."""
     import csv
     from datetime import datetime
 
+    ds = torch.load('dataset/gpu_ag_dataset.pt', weights_only=False)
+
+    # Filter wells if specified
+    if well_filter:
+        wells_to_test = [(name, ds[name]) for name in well_filter if name in ds]
+        n_wells = len(wells_to_test)
+    else:
+        wells_to_test = list(ds.items())
+        n_wells = len(wells_to_test)
+
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_started = datetime.now().isoformat()
-    print(f"Testing full well optimization on 100 wells (angle_range=±{angle_range}°)")
+    print(f"Testing full well optimization on {n_wells} wells (angle_range=±{angle_range}°)")
     print(f"Run ID: {run_id}")
     print(f"Started: {run_started}")
     print("=" * 70)
@@ -1021,13 +1042,11 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True):
     print("-" * 70)
     sys.stdout.flush()
 
-    ds = torch.load('dataset/gpu_ag_dataset.pt', weights_only=False)
-
     errors = []
     baseline_errors = []
     t_start = time.time()
 
-    for i, (well_name, well_data) in enumerate(ds.items()):
+    for i, (well_name, well_data) in enumerate(wells_to_test):
         well_started = datetime.now().isoformat()
         t_well_start = time.time()
 
@@ -1187,6 +1206,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Full well GPU optimizer')
     parser.add_argument('--all', action='store_true', help='Test all 100 wells')
+    parser.add_argument('--wells', nargs='+', help='Specific wells to test')
     parser.add_argument('--angle-range', type=float, default=1.5, help='Angle range in degrees')
     parser.add_argument('--angle-step', type=float, default=0.2, help='Angle step in degrees')
     parser.add_argument('--chunk-size', type=int, default=None, help='Override chunk size')
@@ -1210,5 +1230,8 @@ if __name__ == '__main__':
     if args.all:
         print("\n" + "="*70)
         test_all_wells(angle_range=args.angle_range)
+    elif args.wells:
+        print("\n" + "="*70)
+        test_all_wells(angle_range=args.angle_range, well_filter=args.wells)
     else:
         test_single_well()

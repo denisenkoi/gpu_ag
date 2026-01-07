@@ -42,19 +42,30 @@ from cpu_baseline.typewell_provider import (
     GR_SMOOTHING_WINDOW,
     GR_SMOOTHING_ORDER
 )
+from cpu_baseline.typelog_preprocessing import prepare_typelog
 
 # Load data once at startup
 print("Loading dataset...")
 DATASET = torch.load('dataset/gpu_ag_dataset.pt', weights_only=False)
-ERRORS = torch.load('dataset/baseline_errors.pt', weights_only=False)
-print(f"Loaded {len(DATASET)} wells")
 
-# Build dropdown options sorted by RMSE (worst first)
-WELL_OPTIONS = [
-    {'label': f"{e['well']} (RMSE={e['rmse']:.1f}m, end={e['endpoint_error']:+.1f}m)", 'value': e['well']}
-    for e in ERRORS  # already sorted by RMSE desc
-]
-DEFAULT_WELL = ERRORS[0]['well'] if ERRORS else list(DATASET.keys())[0]
+# Try to load baseline errors, fallback to simple well list
+ERRORS = None
+try:
+    ERRORS = torch.load('dataset/baseline_errors.pt', weights_only=False)
+    print(f"Loaded {len(DATASET)} wells with baseline errors")
+except FileNotFoundError:
+    print(f"Loaded {len(DATASET)} wells (no baseline_errors.pt)")
+
+# Build dropdown options
+if ERRORS:
+    WELL_OPTIONS = [
+        {'label': f"{e['well']} (RMSE={e['rmse']:.1f}m, end={e['endpoint_error']:+.1f}m)", 'value': e['well']}
+        for e in ERRORS
+    ]
+    DEFAULT_WELL = ERRORS[0]['well']
+else:
+    WELL_OPTIONS = [{'label': w, 'value': w} for w in sorted(DATASET.keys())]
+    DEFAULT_WELL = WELL_OPTIONS[0]['value'] if WELL_OPTIONS else None
 
 
 def get_well_tvt_data(well_name):
@@ -80,8 +91,15 @@ def get_well_tvt_data(well_name):
     # PseudoTypeLog is already in TVT coordinates
     pseudo_tvt = pseudo_tvd
 
-    # Stitched typewell (uses NORMALIZATION_MODE from env, with smoothing)
-    stitched_tvt, stitched_gr = stitch_typewell_from_dataset(data, apply_smoothing=True)
+    # OLD: Stitched typewell (extend_pseudo_with_typelog, tvd_shift applied in optimizer)
+    stitched_tvt_old, stitched_gr_old = stitch_typewell_from_dataset(data, apply_smoothing=True)
+
+    # NEW: prepare_typelog (stitch_typelogs, tvd_shift applied before stitch)
+    try:
+        stitched_tvt_new, stitched_gr_new, new_meta = prepare_typelog(data, use_pseudo=True, apply_smoothing=True)
+    except Exception as e:
+        print(f"Warning: prepare_typelog failed for {well_name}: {e}")
+        stitched_tvt_new, stitched_gr_new = stitched_tvt_old, stitched_gr_old
 
     # Overlap metrics (normalized MSE×10 and Pearson)
     overlap_metrics = compute_overlap_metrics(type_tvd, type_gr, pseudo_tvd, pseudo_gr)
@@ -129,8 +147,12 @@ def get_well_tvt_data(well_name):
         'type_gr': type_gr,
         'pseudo_tvt': pseudo_tvt,
         'pseudo_gr': pseudo_gr,
-        'stitched_tvt': stitched_tvt,
-        'stitched_gr': stitched_gr,
+        # OLD (master) stitched typelog
+        'stitched_tvt_old': stitched_tvt_old,
+        'stitched_gr_old': stitched_gr_old,
+        # NEW (fixed) stitched typelog
+        'stitched_tvt_new': stitched_tvt_new,
+        'stitched_gr_new': stitched_gr_new,
         'well_tvt_ref': well_tvt_ref,
         'well_gr': well_gr,
         'well_md': well_md,
@@ -146,6 +168,9 @@ def get_well_tvt_data(well_name):
         'overlap_mse': overlap_metrics['mse'],
         'overlap_pearson': overlap_metrics['pearson'],
         'overlap_length': overlap_metrics['overlap_length'],
+        # Counts for info
+        'n_points_old': len(stitched_tvt_old),
+        'n_points_new': len(stitched_tvt_new),
     }
 
 
@@ -224,6 +249,32 @@ app.layout = html.Div([
         ], style={'display': 'inline-block', 'width': '150px'}),
     ], style={'textAlign': 'center', 'marginBottom': '10px'}),
 
+    # TypeLog mode selector
+    html.Div([
+        html.Div([
+            html.Label('TypeLog mode:'),
+            dcc.RadioItems(
+                id='typelog-mode',
+                options=[
+                    {'label': 'OLD (master, extend_pseudo)', 'value': 'old'},
+                    {'label': 'NEW (fixed, stitch_typelogs)', 'value': 'new'},
+                ],
+                value='old',
+                inline=True,
+                style={'marginLeft': '10px'}
+            ),
+        ], style={'display': 'inline-block', 'marginRight': '30px'}),
+
+        html.Div([
+            dcc.Checklist(
+                id='show-both-typelogs',
+                options=[{'label': 'Show both OLD and NEW', 'value': 'show'}],
+                value=[],
+                inline=True
+            ),
+        ], style={'display': 'inline-block'}),
+    ], style={'textAlign': 'center', 'marginBottom': '10px', 'padding': '10px', 'backgroundColor': '#f0f0f0'}),
+
     dcc.Graph(
         id='tvt-graph',
         style={'height': '80vh'},
@@ -238,9 +289,11 @@ app.layout = html.Div([
     [Input('well-dropdown', 'value'),
      Input('filter-type', 'value'),
      Input('filter-window', 'value'),
-     Input('filter-polyorder', 'value')]
+     Input('filter-polyorder', 'value'),
+     Input('typelog-mode', 'value'),
+     Input('show-both-typelogs', 'value')]
 )
-def update_graph(well_name, filter_type, filter_window, filter_polyorder):
+def update_graph(well_name, filter_type, filter_window, filter_polyorder, typelog_mode, show_both):
     """Update graph when inputs change."""
     if not well_name:
         return go.Figure(), "Select a well"
@@ -317,18 +370,56 @@ def update_graph(well_name, filter_type, filter_window, filter_polyorder):
     )
 
     # === RIGHT: AUTO (stitched typewell) ===
-    # Stitched TypeLog (pseudo + type, smoothed) - purple
-    COLOR_STITCHED = 'purple'
+    # Choose which stitched typelog to show based on mode
+    COLOR_OLD = 'purple'
+    COLOR_NEW = 'green'
+
+    # Primary stitched typelog (based on mode)
+    if typelog_mode == 'new':
+        primary_tvt = data['stitched_tvt_new']
+        primary_gr = data['stitched_gr_new']
+        primary_color = COLOR_NEW
+        primary_name = f"Stitched NEW ({data['n_points_new']}pts)"
+    else:
+        primary_tvt = data['stitched_tvt_old']
+        primary_gr = data['stitched_gr_old']
+        primary_color = COLOR_OLD
+        primary_name = f"Stitched OLD ({data['n_points_old']}pts)"
+
     fig.add_trace(
         go.Scatter(
-            x=data['stitched_gr'], y=data['stitched_tvt'],
-            mode='lines', name='Stitched TypeLog',
-            line=dict(color=COLOR_STITCHED, width=2),
-            legendgroup='stitched', showlegend=True,
-            hovertemplate='GR: %{x:.1f}<br>TVT: %{y:.2f}m<extra>Stitched</extra>'
+            x=primary_gr, y=primary_tvt,
+            mode='lines', name=primary_name,
+            line=dict(color=primary_color, width=2),
+            legendgroup='stitched_primary', showlegend=True,
+            hovertemplate='GR: %{x:.1f}<br>TVT: %{y:.2f}m<extra>' + primary_name + '</extra>'
         ),
         row=1, col=2
     )
+
+    # Show both if checkbox is checked
+    if show_both and 'show' in show_both:
+        if typelog_mode == 'new':
+            secondary_tvt = data['stitched_tvt_old']
+            secondary_gr = data['stitched_gr_old']
+            secondary_color = COLOR_OLD
+            secondary_name = f"Stitched OLD ({data['n_points_old']}pts)"
+        else:
+            secondary_tvt = data['stitched_tvt_new']
+            secondary_gr = data['stitched_gr_new']
+            secondary_color = COLOR_NEW
+            secondary_name = f"Stitched NEW ({data['n_points_new']}pts)"
+
+        fig.add_trace(
+            go.Scatter(
+                x=secondary_gr, y=secondary_tvt,
+                mode='lines', name=secondary_name,
+                line=dict(color=secondary_color, width=1, dash='dash'),
+                legendgroup='stitched_secondary', showlegend=True, opacity=0.7,
+                hovertemplate='GR: %{x:.1f}<br>TVT: %{y:.2f}m<extra>' + secondary_name + '</extra>'
+            ),
+            row=1, col=2
+        )
 
     # TypeLog (faded, for comparison)
     fig.add_trace(
@@ -400,11 +491,14 @@ def update_graph(well_name, filter_type, filter_window, filter_polyorder):
     # Overlap metrics
     overlap_info = f"Overlap: MSE={data['overlap_mse']:.1f}, r={data['overlap_pearson']:.3f}, {data['overlap_length']:.0f}m"
 
+    # TypeLog mode info
+    mode_info = f"TypeLog: {typelog_mode.upper()} (OLD:{data['n_points_old']}pts, NEW:{data['n_points_new']}pts)"
+
     if error_info:
         info = (f"RMSE={error_info['rmse']:.2f}m | Endpoint={error_info['endpoint_error']:+.2f}m | "
-                f"norm_mult={data['norm_mult']:.4f} | {overlap_info} | {filter_info}")
+                f"norm_mult={data['norm_mult']:.4f} | {overlap_info} | {mode_info} | {filter_info}")
     else:
-        info = f"norm_mult={data['norm_mult']:.4f} | {overlap_info} | {filter_info}"
+        info = f"norm_mult={data['norm_mult']:.4f} | {overlap_info} | {mode_info} | {filter_info}"
 
     return fig, info
 

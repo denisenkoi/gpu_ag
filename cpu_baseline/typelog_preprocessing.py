@@ -147,21 +147,29 @@ def stitch_typelogs(
     result_tvd_list = []
     result_gr_list = []
 
-    # Part 1: TypeLog BEFORE pseudo (type_tvd < overlap_start)
-    mask_before = type_tvd < overlap_start - pseudo_step / 2
-    if mask_before.any():
-        result_tvd_list.append(type_tvd[mask_before])
-        result_gr_list.append(type_gr[mask_before])
+    # Part 1: TypeLog BEFORE pseudo - INTERPOLATE to pseudo_step grid
+    type_min = type_tvd.min()
+    if type_min < overlap_start - pseudo_step:
+        # Create fine grid from type_min to overlap_start
+        grid_before = np.arange(type_min, overlap_start - pseudo_step / 2, pseudo_step)
+        if len(grid_before) > 0:
+            gr_before = np.interp(grid_before, type_tvd, type_gr)
+            result_tvd_list.append(grid_before)
+            result_gr_list.append(gr_before)
 
     # Part 2: PseudoTypeLog (entire range)
     result_tvd_list.append(pseudo_tvd)
     result_gr_list.append(pseudo_gr)
 
-    # Part 3: TypeLog AFTER pseudo (type_tvd > overlap_end)
-    mask_after = type_tvd > overlap_end + pseudo_step / 2
-    if mask_after.any():
-        result_tvd_list.append(type_tvd[mask_after])
-        result_gr_list.append(type_gr[mask_after])
+    # Part 3: TypeLog AFTER pseudo - INTERPOLATE to pseudo_step grid
+    type_max = type_tvd.max()
+    if type_max > overlap_end + pseudo_step:
+        # Create fine grid from overlap_end to type_max
+        grid_after = np.arange(overlap_end + pseudo_step, type_max + pseudo_step / 2, pseudo_step)
+        if len(grid_after) > 0:
+            gr_after = np.interp(grid_after, type_tvd, type_gr)
+            result_tvd_list.append(grid_after)
+            result_gr_list.append(gr_after)
 
     result_tvd = np.concatenate(result_tvd_list)
     result_gr = np.concatenate(result_gr_list)
@@ -214,67 +222,50 @@ def prepare_typelog(
     if hasattr(norm_multiplier, 'item'):
         norm_multiplier = norm_multiplier.item()
 
-    # Step 1: Apply tvd_shift to TypeLog BEFORE stitching
-    type_tvd_shifted = type_tvd + tvd_shift
-
-    # Step 2: Apply norm_multiplier (pseudo * mult, type unchanged)
+    # Step 1: Apply norm_multiplier (pseudo * mult, type unchanged) - same as OLD
     pseudo_gr_mult = pseudo_gr * norm_multiplier if norm_multiplier != 1.0 else pseudo_gr.copy()
     type_gr_raw = type_gr.copy()  # TypeLog is reference, no multiplier
 
-    # Step 3: Find overlap and compute min/max for 0-100 normalization
-    # Range: from overlap_start to end of both curves (same as SC baseline)
-    overlap_start = max(type_tvd_shifted.min(), pseudo_tvd.min())
-    overlap_end = min(type_tvd_shifted.max(), pseudo_tvd.max())
-
-    if overlap_end > overlap_start:
-        type_mask = type_tvd_shifted >= overlap_start
-        pseudo_mask = pseudo_tvd >= overlap_start
-
-        type_gr_from_overlap = type_gr_raw[type_mask]
-        pseudo_gr_from_overlap = pseudo_gr_mult[pseudo_mask]
-
-        all_gr_from_overlap = np.concatenate([type_gr_from_overlap, pseudo_gr_from_overlap])
-        gr_min, gr_max = all_gr_from_overlap.min(), all_gr_from_overlap.max()
-    else:
-        # No overlap - use full range
-        all_gr = np.concatenate([type_gr_raw, pseudo_gr_mult])
-        gr_min, gr_max = all_gr.min(), all_gr.max()
-
-    # Step 4: Normalize BOTH to 0-100 BEFORE stitching
-    if (gr_max - gr_min) > 1e-6:
-        type_gr_norm = (type_gr_raw - gr_min) / (gr_max - gr_min) * 100
-        pseudo_gr_norm = (pseudo_gr_mult - gr_min) / (gr_max - gr_min) * 100
-    else:
-        type_gr_norm = type_gr_raw.copy()
-        pseudo_gr_norm = pseudo_gr_mult.copy()
-
-    # Step 5: Compute overlap metrics on normalized data BEFORE stitching
+    # Step 2: Compute overlap metrics (use shifted coords for correct overlap detection)
+    type_tvd_for_metrics = type_tvd + tvd_shift
     overlap_metrics = compute_overlap_metrics(
-        type_tvd_shifted, type_gr_norm,
-        pseudo_tvd, pseudo_gr_norm
+        type_tvd_for_metrics, type_gr_raw,
+        pseudo_tvd, pseudo_gr_mult
     )
 
     logger.info(
         f"prepare_typelog: tvd_shift={tvd_shift:.1f}, "
-        f"type_tvd_shifted=[{type_tvd_shifted.min():.0f}-{type_tvd_shifted.max():.0f}], "
+        f"type_tvd_raw=[{type_tvd.min():.0f}-{type_tvd.max():.0f}], "
         f"pseudo_tvd=[{pseudo_tvd.min():.0f}-{pseudo_tvd.max():.0f}], "
         f"overlap={overlap_metrics['overlap_length']:.0f}m, "
         f"pearson={overlap_metrics['pearson']:.3f}, rmse={overlap_metrics['rmse']:.2f}"
     )
 
-    # Step 6: Stitch normalized data
+    # Step 3: Stitch with RAW TypeLog coordinates (tvd_shift applied in optimizer)
+    # This matches OLD behavior where extend_pseudo_with_typelog used raw coords
     if use_pseudo:
         result_tvd, result_gr = stitch_typelogs(
-            type_tvd_shifted, type_gr_norm,
-            pseudo_tvd, pseudo_gr_norm
+            type_tvd, type_gr_raw,  # Use raw type_tvd, not shifted!
+            pseudo_tvd, pseudo_gr_mult
         )
         logger.debug(f"Stitched TypeLog: {len(type_tvd)} + {len(pseudo_tvd)} -> {len(result_tvd)} points")
     else:
-        result_tvd = type_tvd_shifted
-        result_gr = type_gr_norm
+        result_tvd = type_tvd.copy()  # Use raw type_tvd
+        result_gr = type_gr_raw.copy()
         logger.debug(f"TypeLog only: {len(result_tvd)} points")
 
-    # Step 7: Apply smoothing (on already normalized data)
+    # Step 4: NO 0-100 normalization (OLD behavior - use raw GR values)
+    # Just record min/max for info
+    overlap_start = max(type_tvd.min(), pseudo_tvd.min())
+    mask_from_overlap = result_tvd >= overlap_start
+    if mask_from_overlap.any():
+        gr_from_overlap = result_gr[mask_from_overlap]
+        gr_min, gr_max = gr_from_overlap.min(), gr_from_overlap.max()
+    else:
+        gr_min, gr_max = result_gr.min(), result_gr.max()
+    # Keep result_gr as raw values (not 0-100 normalized)
+
+    # Step 5: Apply smoothing (on raw data)
     if apply_smoothing and GR_SMOOTHING_WINDOW >= 3:
         result_gr = apply_gr_smoothing(result_gr)
         logger.debug(f"Applied smoothing (window={GR_SMOOTHING_WINDOW})")
@@ -295,25 +286,20 @@ def prepare_typelog(
 def normalize_well_gr(
     well_gr: np.ndarray,
     norm_multiplier: float,
-    gr_min: float,
-    gr_max: float
+    gr_min: float = None,
+    gr_max: float = None
 ) -> np.ndarray:
     """
-    Normalize well GR to match TypeLog normalization.
+    Normalize well GR to match TypeLog (OLD behavior - only apply norm_multiplier).
 
     Args:
         well_gr: Well GR array
         norm_multiplier: Normalization multiplier from dataset
-        gr_min, gr_max: Min/max from TypeLog before 0-100 normalization
+        gr_min, gr_max: Unused (kept for API compatibility)
 
     Returns:
-        Normalized well GR (0-100 range matching TypeLog)
+        Well GR with norm_multiplier applied (raw scale, no 0-100 normalization)
     """
-    # Step 1: Apply norm_multiplier
+    # Only apply norm_multiplier (same as OLD)
     result = well_gr * norm_multiplier if norm_multiplier != 1.0 else well_gr.copy()
-
-    # Step 2: Apply same 0-100 normalization as TypeLog
-    if (gr_max - gr_min) > 1e-6:
-        result = (result - gr_min) / (gr_max - gr_min) * 100
-
     return result
