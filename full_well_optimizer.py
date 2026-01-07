@@ -55,10 +55,12 @@ SC_ENABLED = False
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # GPU configurations
+# NOTE: 5090 degrades badly at chunk_size=500k (55s vs 8s)
+# Conservative settings for stability
 GPU_CONFIGS = {
-    '3090': {'chunk_size': 250000, 'min_free_gb': 19},
-    '5090': {'chunk_size': 500000, 'min_free_gb': 29},
-    'default': {'chunk_size': 250000, 'min_free_gb': 10},
+    '3090': {'chunk_size': 70000, 'min_free_gb': 15},
+    '5090': {'chunk_size': 100000, 'min_free_gb': 20},
+    'default': {'chunk_size': 70000, 'min_free_gb': 10},
 }
 
 
@@ -363,6 +365,14 @@ def optimize_segment_block_gpu(
             best_score = chunk_best_score
             best_idx_global = chunk_start + chunk_best_idx
             best_pearson = pearsons[chunk_best_idx].item()
+
+        # Cleanup chunk tensors to prevent VRAM leak
+        del chunk_angles, chunk_start_shifts, seg_md_lens_t, shift_deltas
+        del cumsum, end_shifts, start_shifts, synthetic, synthetic_centered
+        del numer, denom, pearsons, mse, mse_norm, scores
+        if all_tvt is not None:
+            del all_tvt
+        torch.cuda.empty_cache()
 
     # Get best result
     best_start_shift = float(all_start_shifts_np[best_idx_global])
