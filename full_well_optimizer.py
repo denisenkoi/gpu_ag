@@ -17,6 +17,7 @@ Based on param_search findings:
 import sys
 import os
 import time
+import json
 import torch
 import numpy as np
 from pathlib import Path
@@ -777,12 +778,13 @@ def optimize_full_well(
         apply_smoothing=True
     )
 
-    # tvd_shift: for stitched mode it's 0 (OLD behavior that gave RMSE=4.17m)
-    # TypeLog and ref_shift are both computed without tvd_shift correction
-    if USE_PSEUDO_TYPELOG:
-        tvd_shift = 0.0  # Match OLD behavior
-    else:
-        tvd_shift = typelog_meta['tvd_shift']
+    # tvd_shift from metadata - honest mode without data leakage
+    # TESTED 2026-01-08:
+    #   - with shift (honest): RMSE=6.80m, overlap Pearson=0.743
+    #   - with shift=0 (leakage): RMSE=4.16m, overlap Pearson=0.364
+    # shift=0 gives better RMSE but uses future data (ref_shift computed with tvd_shift)
+    # Using honest mode now - worse RMSE but no leakage
+    tvd_shift = typelog_meta['tvd_shift']
 
     # Interpolate GR to well_md and apply same normalization as TypeLog
     well_gr = np.interp(well_md, log_md, log_gr)
@@ -999,7 +1001,7 @@ def test_single_well(well_name: str = "Well1221~EGFDL"):
         print(f"Time: {t1-t0:.1f}s")
 
 
-def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter: list = None):
+def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter: list = None, json_dir: str = None):
     """Test on all 100 wells with CSV export after each well."""
     import csv
     from datetime import datetime
@@ -1039,6 +1041,12 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter:
         writer.writeheader()
 
     print(f"CSV: {csv_path}")
+
+    # JSON directory setup
+    if json_dir:
+        os.makedirs(json_dir, exist_ok=True)
+        print(f"JSON: {json_dir}")
+
     print("-" * 70)
     sys.stdout.flush()
 
@@ -1145,6 +1153,26 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter:
             writer = csv.DictWriter(f, fieldnames=csv_header)
             writer.writerows(csv_rows)
 
+        # Save JSON interpretation if requested
+        if json_dir:
+            json_data = {
+                "well_name": well_name,
+                "interpretation": {
+                    "segments": [
+                        {
+                            "startMd": float(seg.start_md),
+                            "endMd": float(seg.end_md),
+                            "startShift": float(seg.start_shift),
+                            "endShift": float(seg.end_shift)
+                        }
+                        for seg in segments
+                    ]
+                }
+            }
+            json_path = os.path.join(json_dir, f"{well_name}.json")
+            with open(json_path, 'w') as f:
+                json.dump(json_data, f, indent=2)
+
         # Progress output
         status = "✓" if abs(opt_error) < abs(baseline_error) else "✗"
         print(f"{i+1:3d}/100 {well_name:<20} base={baseline_error:+7.2f}m opt={opt_error:+7.2f}m {status} prep={prep_ms}ms opt={opt_ms}ms")
@@ -1211,6 +1239,7 @@ if __name__ == '__main__':
     parser.add_argument('--angle-step', type=float, default=0.2, help='Angle step in degrees')
     parser.add_argument('--chunk-size', type=int, default=None, help='Override chunk size')
     parser.add_argument('--skip-memory-check', action='store_true', help='Skip GPU memory check')
+    parser.add_argument('--json-dir', type=str, default=None, help='Directory to save JSON interpretations')
     args = parser.parse_args()
 
     # Detect GPU and check memory
@@ -1229,9 +1258,9 @@ if __name__ == '__main__':
 
     if args.all:
         print("\n" + "="*70)
-        test_all_wells(angle_range=args.angle_range)
+        test_all_wells(angle_range=args.angle_range, json_dir=args.json_dir)
     elif args.wells:
         print("\n" + "="*70)
-        test_all_wells(angle_range=args.angle_range, well_filter=args.wells)
+        test_all_wells(angle_range=args.angle_range, well_filter=args.wells, json_dir=args.json_dir)
     else:
         test_single_well()

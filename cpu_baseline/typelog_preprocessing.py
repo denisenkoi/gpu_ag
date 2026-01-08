@@ -185,23 +185,22 @@ def stitch_typelogs(
 def prepare_typelog(
     data: Dict[str, Any],
     use_pseudo: bool = None,
-    apply_smoothing: bool = True
+    apply_smoothing: bool = True,
+    apply_tvd_shift: bool = False
 ) -> Tuple[np.ndarray, np.ndarray, Dict]:
     """
     Prepare TypeLog for optimizer with correct coordinate alignment.
-
-    Key fix: tvd_shift is applied to TypeLog BEFORE stitching.
-    Normalization 0-100 is applied BEFORE stitching (from overlap_start to end).
 
     Args:
         data: Well data from dataset (tensors)
         use_pseudo: Use PseudoTypeLog stitching (default from USE_PSEUDO_TYPELOG env)
         apply_smoothing: Apply Savitzky-Golay filter
+        apply_tvd_shift: If True, apply tvd_typewell_shift to type_tvd BEFORE stitching
 
     Returns:
         (tvd, gr, metadata):
             - tvd: TVD array in well coordinates
-            - gr: GR array normalized 0-100
+            - gr: GR array (raw values)
             - metadata: {gr_min, gr_max, tvd_shift, overlap_metrics, ...}
     """
     if use_pseudo is None:
@@ -210,7 +209,7 @@ def prepare_typelog(
     # Get raw data from tensors
     pseudo_tvd = data['pseudo_tvd'].cpu().numpy() if hasattr(data['pseudo_tvd'], 'cpu') else np.array(data['pseudo_tvd'])
     pseudo_gr = data['pseudo_gr'].cpu().numpy() if hasattr(data['pseudo_gr'], 'cpu') else np.array(data['pseudo_gr'])
-    type_tvd = data['type_tvd'].cpu().numpy() if hasattr(data['type_tvd'], 'cpu') else np.array(data['type_tvd'])
+    type_tvd_raw = data['type_tvd'].cpu().numpy() if hasattr(data['type_tvd'], 'cpu') else np.array(data['type_tvd'])
     type_gr = data['type_gr'].cpu().numpy() if hasattr(data['type_gr'], 'cpu') else np.array(data['type_gr'])
 
     # Get tvd_shift and norm_multiplier
@@ -222,40 +221,45 @@ def prepare_typelog(
     if hasattr(norm_multiplier, 'item'):
         norm_multiplier = norm_multiplier.item()
 
-    # Step 1: Apply norm_multiplier (pseudo * mult, type unchanged) - same as OLD
+    # Step 1: Apply norm_multiplier (pseudo * mult, type unchanged)
     pseudo_gr_mult = pseudo_gr * norm_multiplier if norm_multiplier != 1.0 else pseudo_gr.copy()
-    type_gr_raw = type_gr.copy()  # TypeLog is reference, no multiplier
+    type_gr_raw = type_gr.copy()
 
-    # Step 2: Compute overlap metrics (use shifted coords for correct overlap detection)
-    type_tvd_for_metrics = type_tvd + tvd_shift
+    # Step 2: Apply tvd_shift to type_tvd if requested (ONCE, before everything)
+    if apply_tvd_shift:
+        type_tvd = type_tvd_raw + tvd_shift
+        applied_shift = tvd_shift
+    else:
+        type_tvd = type_tvd_raw.copy()
+        applied_shift = 0.0
+
+    # Step 3: Compute overlap metrics on ACTUAL data (same as will be used for stitching)
     overlap_metrics = compute_overlap_metrics(
-        type_tvd_for_metrics, type_gr_raw,
+        type_tvd, type_gr_raw,  # Use same type_tvd as for stitching!
         pseudo_tvd, pseudo_gr_mult
     )
 
     logger.info(
-        f"prepare_typelog: tvd_shift={tvd_shift:.1f}, "
-        f"type_tvd_raw=[{type_tvd.min():.0f}-{type_tvd.max():.0f}], "
+        f"prepare_typelog: applied_shift={applied_shift:.1f} (raw={tvd_shift:.1f}), "
+        f"type_tvd=[{type_tvd.min():.0f}-{type_tvd.max():.0f}], "
         f"pseudo_tvd=[{pseudo_tvd.min():.0f}-{pseudo_tvd.max():.0f}], "
         f"overlap={overlap_metrics['overlap_length']:.0f}m, "
         f"pearson={overlap_metrics['pearson']:.3f}, rmse={overlap_metrics['rmse']:.2f}"
     )
 
-    # Step 3: Stitch with RAW TypeLog coordinates (tvd_shift applied in optimizer)
-    # This matches OLD behavior where extend_pseudo_with_typelog used raw coords
+    # Step 4: Stitch with type_tvd (already shifted if apply_tvd_shift=True)
     if use_pseudo:
         result_tvd, result_gr = stitch_typelogs(
-            type_tvd, type_gr_raw,  # Use raw type_tvd, not shifted!
+            type_tvd, type_gr_raw,
             pseudo_tvd, pseudo_gr_mult
         )
         logger.debug(f"Stitched TypeLog: {len(type_tvd)} + {len(pseudo_tvd)} -> {len(result_tvd)} points")
     else:
-        result_tvd = type_tvd.copy()  # Use raw type_tvd
+        result_tvd = type_tvd.copy()
         result_gr = type_gr_raw.copy()
         logger.debug(f"TypeLog only: {len(result_tvd)} points")
 
-    # Step 4: NO 0-100 normalization (OLD behavior - use raw GR values)
-    # Just record min/max for info
+    # Step 5: Record GR min/max from overlap zone
     overlap_start = max(type_tvd.min(), pseudo_tvd.min())
     mask_from_overlap = result_tvd >= overlap_start
     if mask_from_overlap.any():
@@ -263,9 +267,8 @@ def prepare_typelog(
         gr_min, gr_max = gr_from_overlap.min(), gr_from_overlap.max()
     else:
         gr_min, gr_max = result_gr.min(), result_gr.max()
-    # Keep result_gr as raw values (not 0-100 normalized)
 
-    # Step 5: Apply smoothing (on raw data)
+    # Step 6: Apply smoothing
     if apply_smoothing and GR_SMOOTHING_WINDOW >= 3:
         result_gr = apply_gr_smoothing(result_gr)
         logger.debug(f"Applied smoothing (window={GR_SMOOTHING_WINDOW})")
@@ -273,7 +276,8 @@ def prepare_typelog(
     metadata = {
         'gr_min': float(gr_min),
         'gr_max': float(gr_max),
-        'tvd_shift': float(tvd_shift),
+        'tvd_shift': float(tvd_shift),  # Original shift from dataset
+        'applied_shift': float(applied_shift),  # Actually applied (0 if not requested)
         'norm_multiplier': float(norm_multiplier),
         'use_pseudo': use_pseudo,
         'overlap_metrics': overlap_metrics,
