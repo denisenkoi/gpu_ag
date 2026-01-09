@@ -3,7 +3,10 @@ TypeLog Preprocessing Module
 
 Prepares TypeLog + PseudoTypeLog data for optimizer with correct coordinate alignment.
 
-Key fix: tvd_shift is applied BEFORE stitching (to TypeLog), not after.
+CRITICAL: tvd_shift is ALWAYS applied to TypeLog for coordinate alignment.
+DO NOT DISABLE THIS SHIFT UNLESS USER EXPLICITLY REQUESTS IT TWICE.
+Without tvd_shift, TypeLog and PseudoTypeLog coordinates don't match,
+resulting in garbage correlations (e.g., -0.25 instead of +0.74).
 
 Configuration via env:
     USE_PSEUDO_TYPELOG=True  # True = stitch, False = TypeLog only
@@ -54,6 +57,55 @@ def apply_gr_smoothing(gr: np.ndarray, window: int = None, order: int = None) ->
     order = min(order, window - 1)
 
     return savgol_filter(gr, window, order)
+
+
+def normalize_gr_0_100(
+    type_gr: np.ndarray,
+    pseudo_gr: np.ndarray,
+    well_gr: np.ndarray,
+    type_tvd: np.ndarray,
+    pseudo_tvd: np.ndarray,
+    well_md: np.ndarray,
+    landing_md: float
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
+    """
+    Normalize ALL GR arrays to 0-100 scale.
+
+    Range (gr_min, gr_max) is computed from WellLog (well_gr)
+    from (landing_md - 300m) to the end of the well.
+
+    Args:
+        type_gr: TypeLog GR values
+        pseudo_gr: PseudoTypeLog GR values
+        well_gr: WellLog GR values
+        type_tvd: TypeLog TVD (shifted)
+        pseudo_tvd: PseudoTypeLog TVD
+        well_md: WellLog MD
+        landing_md: Landing point MD (start of optimization)
+
+    Returns:
+        (type_gr_norm, pseudo_gr_norm, well_gr_norm, gr_min, gr_max)
+    """
+    # Get GR range from WellLog from (landing_md - 300m) to end
+    range_start_md = landing_md - 300.0
+    well_mask = well_md >= range_start_md
+    if well_mask.any():
+        gr_for_range = well_gr[well_mask]
+    else:
+        gr_for_range = well_gr
+
+    gr_min, gr_max = gr_for_range.min(), gr_for_range.max()
+
+    if gr_max - gr_min < 1e-6:
+        # Constant GR - return as-is with dummy range
+        return type_gr.copy(), pseudo_gr.copy(), well_gr.copy(), gr_min, gr_max
+
+    # Normalize ALL 3 logs with same range
+    type_gr_norm = (type_gr - gr_min) / (gr_max - gr_min) * 100
+    pseudo_gr_norm = (pseudo_gr - gr_min) / (gr_max - gr_min) * 100
+    well_gr_norm = (well_gr - gr_min) / (gr_max - gr_min) * 100
+
+    return type_gr_norm, pseudo_gr_norm, well_gr_norm, float(gr_min), float(gr_max)
 
 
 def compute_overlap_metrics(
@@ -185,8 +237,7 @@ def stitch_typelogs(
 def prepare_typelog(
     data: Dict[str, Any],
     use_pseudo: bool = None,
-    apply_smoothing: bool = True,
-    apply_tvd_shift: bool = False
+    apply_smoothing: bool = True
 ) -> Tuple[np.ndarray, np.ndarray, Dict]:
     """
     Prepare TypeLog for optimizer with correct coordinate alignment.
@@ -195,7 +246,6 @@ def prepare_typelog(
         data: Well data from dataset (tensors)
         use_pseudo: Use PseudoTypeLog stitching (default from USE_PSEUDO_TYPELOG env)
         apply_smoothing: Apply Savitzky-Golay filter
-        apply_tvd_shift: If True, apply tvd_typewell_shift to type_tvd BEFORE stitching
 
     Returns:
         (tvd, gr, metadata):
@@ -211,8 +261,10 @@ def prepare_typelog(
     pseudo_gr = data['pseudo_gr'].cpu().numpy() if hasattr(data['pseudo_gr'], 'cpu') else np.array(data['pseudo_gr'])
     type_tvd_raw = data['type_tvd'].cpu().numpy() if hasattr(data['type_tvd'], 'cpu') else np.array(data['type_tvd'])
     type_gr = data['type_gr'].cpu().numpy() if hasattr(data['type_gr'], 'cpu') else np.array(data['type_gr'])
+    well_md = data['log_md'].cpu().numpy() if hasattr(data['log_md'], 'cpu') else np.array(data['log_md'])
+    well_gr = data['log_gr'].cpu().numpy() if hasattr(data['log_gr'], 'cpu') else np.array(data['log_gr'])
 
-    # Get tvd_shift and norm_multiplier
+    # Get tvd_shift, norm_multiplier, landing_md
     tvd_shift = data.get('tvd_typewell_shift', 0.0)
     if hasattr(tvd_shift, 'item'):
         tvd_shift = tvd_shift.item()
@@ -221,52 +273,53 @@ def prepare_typelog(
     if hasattr(norm_multiplier, 'item'):
         norm_multiplier = norm_multiplier.item()
 
-    # Step 1: Apply norm_multiplier (pseudo * mult, type unchanged)
+    landing_md = data.get('landing_end_87_200', data.get('landing_end_dls', 0.0))
+    if hasattr(landing_md, 'item'):
+        landing_md = landing_md.item()
+
+    # Step 1: Apply norm_multiplier (pseudo * mult, well * mult, type unchanged)
     pseudo_gr_mult = pseudo_gr * norm_multiplier if norm_multiplier != 1.0 else pseudo_gr.copy()
+    well_gr_mult = well_gr * norm_multiplier if norm_multiplier != 1.0 else well_gr.copy()
     type_gr_raw = type_gr.copy()
 
-    # Step 2: Apply tvd_shift to type_tvd if requested (ONCE, before everything)
-    if apply_tvd_shift:
-        type_tvd = type_tvd_raw + tvd_shift
-        applied_shift = tvd_shift
-    else:
-        type_tvd = type_tvd_raw.copy()
-        applied_shift = 0.0
+    # Step 2: ALWAYS apply tvd_shift to type_tvd for coordinate alignment
+    # CRITICAL: DO NOT REMOVE THIS SHIFT! Without it, TypeLog and PseudoTypeLog
+    # coordinates don't match, resulting in garbage correlations.
+    # DO NOT DISABLE UNLESS USER EXPLICITLY REQUESTS IT TWICE.
+    type_tvd = type_tvd_raw + tvd_shift
 
-    # Step 3: Compute overlap metrics on ACTUAL data (same as will be used for stitching)
+    # Step 3: Normalize ALL data to 0-100 scale
+    # Range is computed from WellLog (log_gr) from landing_md to end
+    type_gr_norm, pseudo_gr_norm, well_gr_norm, gr_min, gr_max = normalize_gr_0_100(
+        type_gr_raw, pseudo_gr_mult, well_gr_mult,
+        type_tvd, pseudo_tvd, well_md, landing_md
+    )
+
+    # Step 4: Compute overlap metrics (NO transformations - data already normalized)
     overlap_metrics = compute_overlap_metrics(
-        type_tvd, type_gr_raw,  # Use same type_tvd as for stitching!
-        pseudo_tvd, pseudo_gr_mult
+        type_tvd, type_gr_norm,
+        pseudo_tvd, pseudo_gr_norm
     )
 
     logger.info(
-        f"prepare_typelog: applied_shift={applied_shift:.1f} (raw={tvd_shift:.1f}), "
+        f"prepare_typelog: tvd_shift={tvd_shift:.1f}, gr_range=[{gr_min:.1f}-{gr_max:.1f}], "
         f"type_tvd=[{type_tvd.min():.0f}-{type_tvd.max():.0f}], "
         f"pseudo_tvd=[{pseudo_tvd.min():.0f}-{pseudo_tvd.max():.0f}], "
         f"overlap={overlap_metrics['overlap_length']:.0f}m, "
         f"pearson={overlap_metrics['pearson']:.3f}, rmse={overlap_metrics['rmse']:.2f}"
     )
 
-    # Step 4: Stitch with type_tvd (already shifted if apply_tvd_shift=True)
+    # Step 5: Stitch NORMALIZED data
     if use_pseudo:
         result_tvd, result_gr = stitch_typelogs(
-            type_tvd, type_gr_raw,
-            pseudo_tvd, pseudo_gr_mult
+            type_tvd, type_gr_norm,
+            pseudo_tvd, pseudo_gr_norm
         )
         logger.debug(f"Stitched TypeLog: {len(type_tvd)} + {len(pseudo_tvd)} -> {len(result_tvd)} points")
     else:
         result_tvd = type_tvd.copy()
-        result_gr = type_gr_raw.copy()
+        result_gr = type_gr_norm.copy()
         logger.debug(f"TypeLog only: {len(result_tvd)} points")
-
-    # Step 5: Record GR min/max from overlap zone
-    overlap_start = max(type_tvd.min(), pseudo_tvd.min())
-    mask_from_overlap = result_tvd >= overlap_start
-    if mask_from_overlap.any():
-        gr_from_overlap = result_gr[mask_from_overlap]
-        gr_min, gr_max = gr_from_overlap.min(), gr_from_overlap.max()
-    else:
-        gr_min, gr_max = result_gr.min(), result_gr.max()
 
     # Step 6: Apply smoothing
     if apply_smoothing and GR_SMOOTHING_WINDOW >= 3:
@@ -276,12 +329,13 @@ def prepare_typelog(
     metadata = {
         'gr_min': float(gr_min),
         'gr_max': float(gr_max),
-        'tvd_shift': float(tvd_shift),  # Original shift from dataset
-        'applied_shift': float(applied_shift),  # Actually applied (0 if not requested)
+        'tvd_shift': float(tvd_shift),  # Always applied
         'norm_multiplier': float(norm_multiplier),
         'use_pseudo': use_pseudo,
         'overlap_metrics': overlap_metrics,
         'n_points': len(result_tvd),
+        'well_gr_norm': well_gr_norm,  # Normalized WellLog for optimizer
+        'well_md': well_md,
     }
 
     return result_tvd, result_gr, metadata

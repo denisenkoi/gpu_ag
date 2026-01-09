@@ -37,12 +37,14 @@ sys.path.insert(0, str(Path(__file__).parent / "cpu_baseline"))
 from numpy_funcs.interpretation import interpolate_shift_at_md
 from cpu_baseline.typewell_provider import (
     stitch_typewell_from_dataset,
-    apply_gr_smoothing,
-    compute_overlap_metrics,
     GR_SMOOTHING_WINDOW,
     GR_SMOOTHING_ORDER
 )
-from cpu_baseline.typelog_preprocessing import prepare_typelog
+from cpu_baseline.typelog_preprocessing import (
+    prepare_typelog,
+    apply_gr_smoothing,
+    compute_overlap_metrics
+)
 
 # Load data once at startup
 print("Loading dataset...")

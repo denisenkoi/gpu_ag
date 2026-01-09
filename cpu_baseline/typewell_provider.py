@@ -19,6 +19,12 @@ import numpy as np
 from typing import Dict, Any, Optional, Tuple
 from scipy.signal import savgol_filter
 
+# Import from same package - try relative first, then absolute
+try:
+    from .typelog_preprocessing import apply_gr_smoothing, compute_overlap_metrics, normalize_gr_0_100
+except ImportError:
+    from typelog_preprocessing import apply_gr_smoothing, compute_overlap_metrics, normalize_gr_0_100
+
 logger = logging.getLogger(__name__)
 
 
@@ -147,36 +153,6 @@ def extend_pseudo_with_typelog(pseudo_log: Dict, type_log: Dict, norm_coef: floa
     return extended_pseudo
 
 
-def apply_gr_smoothing(gr: np.ndarray, window: int = None, order: int = None) -> np.ndarray:
-    """
-    Apply Savitzky-Golay smoothing to GR data.
-
-    Args:
-        gr: GR values array
-        window: Window size (default from GR_SMOOTHING_WINDOW env)
-        order: Polynomial order (default from GR_SMOOTHING_ORDER env)
-
-    Returns:
-        Smoothed GR array (or original if window < 3)
-    """
-    if window is None:
-        window = GR_SMOOTHING_WINDOW
-    if order is None:
-        order = GR_SMOOTHING_ORDER
-
-    if window < 3 or len(gr) < window:
-        return gr
-
-    # Window must be odd
-    if window % 2 == 0:
-        window += 1
-
-    # Order must be less than window
-    order = min(order, window - 1)
-
-    return savgol_filter(gr, window, order)
-
-
 def stitch_typewell_from_dataset(
     data: Dict[str, Any],
     mode: str = None,
@@ -210,11 +186,17 @@ def stitch_typewell_from_dataset(
     pseudo_gr = data['pseudo_gr'].cpu().numpy() if hasattr(data['pseudo_gr'], 'cpu') else np.array(data['pseudo_gr'])
     type_tvd = data['type_tvd'].cpu().numpy() if hasattr(data['type_tvd'], 'cpu') else np.array(data['type_tvd'])
     type_gr = data['type_gr'].cpu().numpy() if hasattr(data['type_gr'], 'cpu') else np.array(data['type_gr'])
+    well_md = data['log_md'].cpu().numpy() if hasattr(data['log_md'], 'cpu') else np.array(data['log_md'])
+    well_gr = data['log_gr'].cpu().numpy() if hasattr(data['log_gr'], 'cpu') else np.array(data['log_gr'])
 
-    # Get tvd_shift for coordinate alignment
+    # Get tvd_shift and landing_md
     tvd_shift = data.get('tvd_typewell_shift', 0.0)
     if hasattr(tvd_shift, 'item'):
         tvd_shift = tvd_shift.item()
+
+    landing_md = data.get('landing_end_87_200', data.get('landing_end_dls', 0.0))
+    if hasattr(landing_md, 'item'):
+        landing_md = landing_md.item()
 
     # ORIGINAL mode: pure typeLog without stitching
     if mode == 'ORIGINAL':
@@ -222,37 +204,46 @@ def stitch_typewell_from_dataset(
         result_tvd = type_tvd
         result_gr = type_gr
     else:
-        # Apply normalization to GR values
+        # Apply norm_multiplier to GR values
         if mode == 'NEW':
-            # NEW: pseudo × mult, type raw
-            pseudo_gr_norm = pseudo_gr * norm_multiplier if norm_multiplier != 1.0 else pseudo_gr
-            type_gr_norm = type_gr.copy()
+            # NEW: pseudo × mult, well × mult, type raw
+            pseudo_gr_mult = pseudo_gr * norm_multiplier if norm_multiplier != 1.0 else pseudo_gr
+            well_gr_mult = well_gr * norm_multiplier if norm_multiplier != 1.0 else well_gr
+            type_gr_mult = type_gr.copy()
         else:
-            # OLD: pseudo raw, type × (1/mult)
-            pseudo_gr_norm = pseudo_gr.copy()
+            # OLD: pseudo raw, well raw, type × (1/mult)
+            pseudo_gr_mult = pseudo_gr.copy()
+            well_gr_mult = well_gr.copy()
             norm_coef = 1.0 / norm_multiplier if norm_multiplier != 0 else 1.0
-            type_gr_norm = type_gr * norm_coef
+            type_gr_mult = type_gr * norm_coef
 
-        # === METRICS BEFORE STITCHING (after normalization AND shift) ===
+        # === NORMALIZE AND COMPUTE METRICS ===
         # Apply tvd_shift to type_tvd for correct coordinate alignment
         type_tvd_shifted = type_tvd + tvd_shift
 
-        # Measure overlap quality between SHIFTED type and pseudo
-        metrics = compute_overlap_metrics(type_tvd_shifted, type_gr_norm, pseudo_tvd, pseudo_gr_norm)
-        logger.info(f"PRE-STITCH metrics: tvd_shift={tvd_shift:.1f}, "
+        # Normalize ALL data to 0-100 scale
+        # Range is computed from WellLog (log_gr) from landing_md to end
+        type_gr_0_100, pseudo_gr_0_100, well_gr_0_100, gr_min, gr_max = normalize_gr_0_100(
+            type_gr_mult, pseudo_gr_mult, well_gr_mult,
+            type_tvd_shifted, pseudo_tvd, well_md, landing_md
+        )
+
+        # Measure overlap quality (NO transformations - data already normalized)
+        metrics = compute_overlap_metrics(type_tvd_shifted, type_gr_0_100, pseudo_tvd, pseudo_gr_0_100)
+        logger.info(f"PRE-STITCH metrics: tvd_shift={tvd_shift:.1f}, gr_range=[{gr_min:.1f}-{gr_max:.1f}], "
                     f"type_tvd_shifted=[{type_tvd_shifted.min():.0f}-{type_tvd_shifted.max():.0f}], "
                     f"pseudo_tvd=[{pseudo_tvd.min():.0f}-{pseudo_tvd.max():.0f}], "
                     f"overlap={metrics['overlap_length']:.0f}m, "
-                    f"pearson={metrics['pearson']:.3f}, rmse={np.sqrt(metrics['mse']/10):.2f}")
+                    f"pearson={metrics['pearson']:.3f}, rmse={metrics['rmse']:.2f}")
 
-        # Build dict format for extend_pseudo_with_typelog
+        # Build dict format for extend_pseudo_with_typelog (NORMALIZED 0-100 data)
         pseudo_dict = {
             'tvdSortedPoints': [{'trueVerticalDepth': float(tvd), 'data': float(gr)}
-                               for tvd, gr in zip(pseudo_tvd, pseudo_gr_norm)]
+                               for tvd, gr in zip(pseudo_tvd, pseudo_gr_0_100)]
         }
         type_dict = {
             'tvdSortedPoints': [{'trueVerticalDepth': float(tvd), 'data': float(gr)}
-                               for tvd, gr in zip(type_tvd, type_gr_norm)]
+                               for tvd, gr in zip(type_tvd, type_gr_0_100)]
         }
 
         stitched = extend_pseudo_with_typelog(pseudo_dict, type_dict, norm_coef=1.0)
@@ -267,124 +258,6 @@ def stitch_typewell_from_dataset(
         logger.debug(f"Applied Savitzky-Golay smoothing (window={GR_SMOOTHING_WINDOW}, order={GR_SMOOTHING_ORDER})")
 
     return result_tvd, result_gr
-
-
-def compute_overlap_metrics(
-    type_tvd: np.ndarray, type_gr: np.ndarray,
-    pseudo_tvd: np.ndarray, pseudo_gr: np.ndarray
-) -> Dict[str, float]:
-    """
-    Compute MSE and Pearson correlation in overlap zone (normalized).
-
-    Args:
-        type_tvd, type_gr: TypeLog arrays
-        pseudo_tvd, pseudo_gr: PseudoTypeLog arrays
-
-    Returns:
-        Dict with 'mse' (×10), 'pearson', 'overlap_start', 'overlap_end', 'overlap_length'
-    """
-    # Find overlap zone
-    overlap_start = max(type_tvd.min(), pseudo_tvd.min())
-    overlap_end = min(type_tvd.max(), pseudo_tvd.max())
-
-    if overlap_end <= overlap_start:
-        return {'mse': np.nan, 'pearson': np.nan, 'overlap_start': 0, 'overlap_end': 0, 'overlap_length': 0}
-
-    # Interpolate both to common grid in overlap zone
-    step = 0.1  # 0.1m step
-    common_tvd = np.arange(overlap_start, overlap_end, step)
-
-    type_interp = np.interp(common_tvd, type_tvd, type_gr)
-    pseudo_interp = np.interp(common_tvd, pseudo_tvd, pseudo_gr)
-
-    # Normalize: find local min/max, scale to 0-100
-    all_gr = np.concatenate([type_interp, pseudo_interp])
-    gr_min, gr_max = all_gr.min(), all_gr.max()
-
-    if gr_max - gr_min < 1e-6:
-        return {'mse': 0.0, 'pearson': 1.0, 'overlap_start': overlap_start, 'overlap_end': overlap_end,
-                'overlap_length': overlap_end - overlap_start}
-
-    type_norm = (type_interp - gr_min) / (gr_max - gr_min) * 100
-    pseudo_norm = (pseudo_interp - gr_min) / (gr_max - gr_min) * 100
-
-    # MSE × 10
-    mse = np.mean((type_norm - pseudo_norm) ** 2) * 10
-
-    # Pearson
-    type_centered = type_norm - type_norm.mean()
-    pseudo_centered = pseudo_norm - pseudo_norm.mean()
-    denom = np.sqrt((type_centered ** 2).sum() * (pseudo_centered ** 2).sum())
-    pearson = (type_centered * pseudo_centered).sum() / denom if denom > 1e-10 else 0.0
-
-    return {
-        'mse': float(mse),
-        'pearson': float(pearson),
-        'overlap_start': float(overlap_start),
-        'overlap_end': float(overlap_end),
-        'overlap_length': float(overlap_end - overlap_start)
-    }
-
-
-def compute_stitch_quality(
-    data: Dict[str, Any],
-    mode: str = None
-) -> Dict[str, float]:
-    """
-    Compute overlap quality metrics BEFORE stitching.
-
-    Uses same normalization as stitch_typewell_from_dataset but measures
-    Pearson and RMSE between TypeLog and PseudoTypeLog in overlap zone.
-
-    Args:
-        data: Well data from dataset
-        mode: 'OLD', 'NEW', or 'ORIGINAL' (default from env)
-
-    Returns:
-        Dict with pearson, rmse, overlap_length, and normalized GR ranges
-    """
-    if mode is None:
-        mode = os.getenv('NORMALIZATION_MODE', 'NEW')
-
-    norm_multiplier = data.get('norm_multiplier', 1.0)
-    if hasattr(norm_multiplier, 'item'):
-        norm_multiplier = norm_multiplier.item()
-
-    # Get raw data
-    pseudo_tvd = data['pseudo_tvd'].cpu().numpy() if hasattr(data['pseudo_tvd'], 'cpu') else np.array(data['pseudo_tvd'])
-    pseudo_gr = data['pseudo_gr'].cpu().numpy() if hasattr(data['pseudo_gr'], 'cpu') else np.array(data['pseudo_gr'])
-    type_tvd = data['type_tvd'].cpu().numpy() if hasattr(data['type_tvd'], 'cpu') else np.array(data['type_tvd'])
-    type_gr = data['type_gr'].cpu().numpy() if hasattr(data['type_gr'], 'cpu') else np.array(data['type_gr'])
-
-    # Apply same normalization as stitch_typewell_from_dataset
-    if mode == 'NEW':
-        # pseudo × mult, type raw
-        pseudo_gr_norm = pseudo_gr * norm_multiplier
-        type_gr_norm = type_gr.copy()
-    elif mode == 'OLD':
-        # pseudo raw, type × (1/mult)
-        pseudo_gr_norm = pseudo_gr.copy()
-        norm_coef = 1.0 / norm_multiplier if norm_multiplier != 0 else 1.0
-        type_gr_norm = type_gr * norm_coef
-    else:  # ORIGINAL
-        return {'pearson': np.nan, 'rmse': np.nan, 'overlap_length': 0, 'mode': mode}
-
-    # Compute metrics on normalized data
-    metrics = compute_overlap_metrics(type_tvd, type_gr_norm, pseudo_tvd, pseudo_gr_norm)
-
-    # Add RMSE (sqrt of MSE/10)
-    rmse = np.sqrt(metrics['mse'] / 10) if not np.isnan(metrics['mse']) else np.nan
-
-    return {
-        'pearson': metrics['pearson'],
-        'rmse': rmse,
-        'mse_x10': metrics['mse'],
-        'overlap_length': metrics['overlap_length'],
-        'overlap_start': metrics['overlap_start'],
-        'overlap_end': metrics['overlap_end'],
-        'mode': mode,
-        'norm_multiplier': norm_multiplier
-    }
 
 
 class TypewellProvider:
