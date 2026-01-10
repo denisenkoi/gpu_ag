@@ -40,7 +40,7 @@ from cpu_baseline.typewell_provider import (
     GR_SMOOTHING_WINDOW,
     GR_SMOOTHING_ORDER
 )
-from cpu_baseline.typelog_preprocessing import (
+from cpu_baseline.preprocessing import (
     prepare_typelog,
     apply_gr_smoothing,
     compute_overlap_metrics

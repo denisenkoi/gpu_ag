@@ -21,9 +21,9 @@ from scipy.signal import savgol_filter
 
 # Import from same package - try relative first, then absolute
 try:
-    from .typelog_preprocessing import apply_gr_smoothing, compute_overlap_metrics, normalize_gr_0_100
+    from .preprocessing import apply_gr_smoothing, compute_overlap_metrics, normalize_gr_0_100
 except ImportError:
-    from typelog_preprocessing import apply_gr_smoothing, compute_overlap_metrics, normalize_gr_0_100
+    from preprocessing import apply_gr_smoothing, compute_overlap_metrics, normalize_gr_0_100
 
 logger = logging.getLogger(__name__)
 

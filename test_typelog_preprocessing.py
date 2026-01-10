@@ -15,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent / "cpu_baseline"))
 
-from cpu_baseline.typelog_preprocessing import prepare_typelog
+from cpu_baseline.preprocessing import prepare_typelog
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 

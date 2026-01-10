@@ -31,7 +31,7 @@ from torch_funcs.converters import GPU_DTYPE
 from smart_segmenter import SmartSegmenter
 from peak_detectors import OtsuPeakDetector, RegionFinder
 from numpy_funcs.interpretation import interpolate_shift_at_md
-from cpu_baseline.typelog_preprocessing import prepare_typelog, normalize_well_gr
+from cpu_baseline.preprocessing import prepare_typelog, normalize_well_gr
 import pandas as pd
 
 # Load SC baseline from CSV (once at module load)
