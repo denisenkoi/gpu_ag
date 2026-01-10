@@ -11,6 +11,15 @@ resulting in garbage correlations (e.g., -0.25 instead of +0.74).
 Configuration via env:
     USE_PSEUDO_TYPELOG=True  # True = stitch, False = TypeLog only
 
+WORKING CONFIGURATION (2026-01-10):
+    Dataset: data/wells_limited_pseudo.pt (100 wells, no pseudo leakage)
+    Normalization 0-100: DISABLED (bug in normalize_well_gr - doesn't apply to optimizer)
+    USE_PSEUDO_TYPELOG=True: RMSE=4.69m, 64/100 wells improved
+    USE_PSEUDO_TYPELOG=False: RMSE=6.22m, 54/100 wells improved
+
+    TODO: Refactor preprocessing - move all normalization to single module,
+    ensure well_gr in optimizer uses same 0-100 normalization as TypeLog.
+
 Author: Auto-generated
 Date: 2026-01-07
 """
@@ -290,10 +299,15 @@ def prepare_typelog(
 
     # Step 3: Normalize ALL data to 0-100 scale
     # Range is computed from WellLog (log_gr) from landing_md to end
-    type_gr_norm, pseudo_gr_norm, well_gr_norm, gr_min, gr_max = normalize_gr_0_100(
-        type_gr_raw, pseudo_gr_mult, well_gr_mult,
-        type_tvd, pseudo_tvd, well_md, landing_md
-    )
+    # DISABLED FOR TESTING - using raw data instead
+    # type_gr_norm, pseudo_gr_norm, well_gr_norm, gr_min, gr_max = normalize_gr_0_100(
+    #     type_gr_raw, pseudo_gr_mult, well_gr_mult,
+    #     type_tvd, pseudo_tvd, well_md, landing_md
+    # )
+    type_gr_norm = type_gr_raw.copy()
+    pseudo_gr_norm = pseudo_gr_mult.copy()
+    well_gr_norm = well_gr_mult.copy()
+    gr_min, gr_max = well_gr_mult.min(), well_gr_mult.max()
 
     # Step 4: Compute overlap metrics (NO transformations - data already normalized)
     overlap_metrics = compute_overlap_metrics(

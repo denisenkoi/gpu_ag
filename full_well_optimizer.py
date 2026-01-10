@@ -268,7 +268,7 @@ def optimize_segment_block_gpu(
     zone_gr_centered = zone_gr - zone_gr.mean()
     zone_gr_ss = (zone_gr_centered**2).sum()
 
-    type_tvd_t = torch.tensor(type_tvd + tvd_shift, device=device, dtype=GPU_DTYPE)  # Apply tvd_shift for coordinate alignment
+    type_tvd_t = torch.tensor(type_tvd, device=device, dtype=GPU_DTYPE)  # tvd_shift already applied in prepare_typelog
     type_gr_t = torch.tensor(type_gr, device=device, dtype=GPU_DTYPE)
 
     # Precompute segment data
@@ -314,12 +314,24 @@ def optimize_segment_block_gpu(
         synthetic = torch.zeros((chunk_n, n_points), device=device, dtype=GPU_DTYPE)
         all_tvt = torch.zeros((chunk_n, n_points), device=device, dtype=GPU_DTYPE) if SC_ENABLED and sc_weight > 0 else None
 
+        # Track solutions that go too far outside TypeLog range
+        MAX_TVT_EXTRAPOLATION = 0.1524  # 0.5 ft max extrapolation
+        out_of_range_mask = torch.zeros(chunk_n, dtype=torch.bool, device=device)
+
         for seg_i, (local_start, local_end, seg_n, seg_tvd, ratio) in enumerate(seg_data):
             seg_start = start_shifts[:, seg_i:seg_i+1]
             seg_end = end_shifts[:, seg_i:seg_i+1]
             seg_shifts = seg_start + ratio.unsqueeze(0) * (seg_end - seg_start)
 
             tvt = seg_tvd.unsqueeze(0) - seg_shifts
+
+            # Check if any point exceeds TypeLog range by more than MAX_TVT_EXTRAPOLATION
+            below_min = type_tvd_t[0] - tvt  # positive if below range
+            above_max = tvt - type_tvd_t[-1]  # positive if above range
+            max_below = below_min.max(dim=1).values  # max exceedance per solution
+            max_above = above_max.max(dim=1).values
+            out_of_range_mask |= (max_below > MAX_TVT_EXTRAPOLATION) | (max_above > MAX_TVT_EXTRAPOLATION)
+
             tvt_clamped = torch.clamp(tvt, type_tvd_t[0], type_tvd_t[-1])
 
             # Store TVT for SC penalty
@@ -359,6 +371,9 @@ def optimize_segment_block_gpu(
             scores = pearsons - mse_weight * mse_norm - sc_weight * sc_penalty
         else:
             scores = pearsons - mse_weight * mse_norm
+
+        # Discard solutions that exceed TypeLog range
+        scores = torch.where(out_of_range_mask, torch.tensor(-1e9, device=device, dtype=scores.dtype), scores)
 
         chunk_best_idx = torch.argmax(scores).item()
         chunk_best_score = scores[chunk_best_idx].item()
@@ -428,7 +443,7 @@ def optimize_segment_block_evolutionary(
     zone_gr_ss = (zone_gr_centered**2).sum()
     zone_gr_var = zone_gr.var()
 
-    type_tvd_t = torch.tensor(type_tvd + tvd_shift, device=device, dtype=GPU_DTYPE)  # Apply tvd_shift for coordinate alignment
+    type_tvd_t = torch.tensor(type_tvd, device=device, dtype=GPU_DTYPE)  # tvd_shift already applied in prepare_typelog
     type_gr_t = torch.tensor(type_gr, device=device, dtype=GPU_DTYPE)
 
     # Precompute segment data
@@ -488,12 +503,24 @@ def optimize_segment_block_evolutionary(
         # Build synthetic GR
         synthetic = torch.zeros((batch_size, n_points), device=device, dtype=GPU_DTYPE)
 
+        # Track solutions that go too far outside TypeLog range
+        MAX_TVT_EXTRAPOLATION = 0.1524  # 0.5 ft max extrapolation
+        out_of_range_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
         for seg_i, (local_start, local_end, seg_n, seg_tvd, ratio) in enumerate(seg_data):
             seg_start = start_shifts[:, seg_i:seg_i+1]
             seg_end = end_shifts[:, seg_i:seg_i+1]
             seg_shifts = seg_start + ratio.unsqueeze(0) * (seg_end - seg_start)
 
             tvt = seg_tvd.unsqueeze(0) - seg_shifts
+
+            # Check if any point exceeds TypeLog range by more than MAX_TVT_EXTRAPOLATION
+            below_min = type_tvd_t[0] - tvt  # positive if below range
+            above_max = tvt - type_tvd_t[-1]  # positive if above range
+            max_below = below_min.max(dim=1).values
+            max_above = above_max.max(dim=1).values
+            out_of_range_mask |= (max_below > MAX_TVT_EXTRAPOLATION) | (max_above > MAX_TVT_EXTRAPOLATION)
+
             tvt_clamped = torch.clamp(tvt, type_tvd_t[0], type_tvd_t[-1])
 
             indices = torch.searchsorted(type_tvd_t, tvt_clamped.reshape(-1))
@@ -522,6 +549,9 @@ def optimize_segment_block_evolutionary(
         # Original: score = pearson - mse_weight * mse_norm
         # Loss = -score + angle_penalty
         loss = -pearsons + mse_weight * mse_norm + angle_penalty
+
+        # Penalize solutions that exceed TypeLog range
+        loss = torch.where(out_of_range_mask, torch.tensor(1e9, device=device, dtype=loss.dtype), loss)
 
         if squeeze_output:
             return loss.squeeze(0)
