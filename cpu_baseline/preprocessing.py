@@ -18,7 +18,7 @@ Configuration via env:
 
 WORKING CONFIGURATION (2026-01-10):
     Dataset: data/wells_limited_pseudo.pt (100 wells, no pseudo leakage)
-    NORMALIZE_0_100=False
+    NORMALIZE_0_100=True (default) - consistent 0-100 normalization
     USE_PSEUDO_TYPELOG=True: RMSE=4.69m, 64/100 wells improved
     USE_PSEUDO_TYPELOG=False: RMSE=6.22m, 54/100 wells improved
 
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration from env
 USE_PSEUDO_TYPELOG = os.getenv('USE_PSEUDO_TYPELOG', 'True').lower() in ('true', '1', 'yes')
-NORMALIZE_0_100 = os.getenv('NORMALIZE_0_100', 'False').lower() in ('true', '1', 'yes')
+NORMALIZE_0_100 = os.getenv('NORMALIZE_0_100', 'True').lower() in ('true', '1', 'yes')
 GR_SMOOTHING_WINDOW = int(os.getenv('GR_SMOOTHING_WINDOW', '0'))
 GR_SMOOTHING_ORDER = int(os.getenv('GR_SMOOTHING_ORDER', '2'))
 
