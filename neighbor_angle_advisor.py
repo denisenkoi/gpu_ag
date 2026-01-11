@@ -136,13 +136,19 @@ class NeighborAngleAdvisor:
 
         return diff_deg, is_opposite
 
-    def _get_dip_angle_at_md(self, well_name: str, md: float) -> Optional[float]:
+    def _get_dip_angle_at_md(self, well_name: str, md: float, smoothing_range: float = 100.0) -> Optional[float]:
         """
-        Get dip angle from reference interpretation at given MD.
+        Get smoothed dip angle from reference interpretation at given MD.
 
-        Dip angle = atan2(end_shift - start_shift, end_md - start_md)
+        Uses trend over ±smoothing_range/2 meters window instead of single segment.
+        If data missing on one side, extends window on other side.
 
-        Returns angle in degrees, or None if no interpretation at this MD.
+        Args:
+            well_name: Well name
+            md: Target MD
+            smoothing_range: Total window size in meters (default 100 = ±50m)
+
+        Returns angle in degrees, or None if no interpretation data.
         """
         data = self.dataset[well_name]
         ref_mds = data['ref_segment_mds'].numpy()
@@ -152,24 +158,50 @@ class NeighborAngleAdvisor:
         if len(ref_mds) == 0:
             return None
 
-        # Find segment containing this MD
-        # ref_mds are segment start MDs, ref_shifts are end shifts
-        for i in range(len(ref_mds)):
-            start_md = ref_mds[i]
-            end_md = ref_mds[i + 1] if i + 1 < len(ref_mds) else data['lateral_well_last_md']
+        last_md = data['lateral_well_last_md']
+        half_range = smoothing_range / 2
 
-            if start_md <= md <= end_md:
-                # Get start and end shifts for this segment
-                start_shift = ref_start_shifts[i]
-                end_shift = ref_shifts[i]
+        # Target window
+        md_left = md - half_range
+        md_right = md + half_range
 
-                # Calculate dip angle
-                dmd = end_md - start_md
-                dshift = end_shift - start_shift
+        # Clamp to data bounds and extend other side if needed
+        first_seg_md = ref_mds[0]
+        if md_left < first_seg_md:
+            extra = first_seg_md - md_left
+            md_left = first_seg_md
+            md_right = min(md_right + extra, last_md)
 
-                if dmd > 0:
-                    dip_rad = np.arctan2(dshift, dmd)
-                    return np.degrees(dip_rad)
+        if md_right > last_md:
+            extra = md_right - last_md
+            md_right = last_md
+            md_left = max(md_left - extra, first_seg_md)
+
+        # Interpolate shift at md_left and md_right
+        def get_shift_at_md(target_md):
+            for i in range(len(ref_mds)):
+                seg_start = ref_mds[i]
+                seg_end = ref_mds[i + 1] if i + 1 < len(ref_mds) else last_md
+
+                if seg_start <= target_md <= seg_end:
+                    # Linear interpolation within segment
+                    if seg_end > seg_start:
+                        t = (target_md - seg_start) / (seg_end - seg_start)
+                        return ref_start_shifts[i] + t * (ref_shifts[i] - ref_start_shifts[i])
+                    return ref_start_shifts[i]
+            return None
+
+        shift_left = get_shift_at_md(md_left)
+        shift_right = get_shift_at_md(md_right)
+
+        if shift_left is None or shift_right is None:
+            return None
+
+        dmd = md_right - md_left
+        dshift = shift_right - shift_left
+
+        if dmd > 0:
+            return np.degrees(np.arctan2(dshift, dmd))
 
         return None
 
@@ -180,7 +212,8 @@ class NeighborAngleAdvisor:
         azimuth_threshold_deg: float = 15.0,
         max_neighbors: int = 5,
         max_distance: float = float('inf'),
-        include_opposite: bool = True
+        include_opposite: bool = True,
+        smoothing_range: float = 100.0
     ) -> List[NeighborResult]:
         """
         Find nearest neighbor points on other wells.
@@ -192,6 +225,7 @@ class NeighborAngleAdvisor:
             max_neighbors: Maximum number of neighbors to return
             max_distance: Maximum 3D distance to consider
             include_opposite: Also search wells going opposite direction (flip dip angle)
+            smoothing_range: Window size for dip smoothing (default 100m)
 
         Returns:
             List of NeighborResult sorted by distance (deduplicated by well)
@@ -303,8 +337,8 @@ class NeighborAngleAdvisor:
             neighbor_md = filtered_md[i]
             neighbor_is_opposite = filtered_is_opposite[i]
 
-            # Get dip angle from reference interpretation
-            dip_angle = self._get_dip_angle_at_md(neighbor_well_name, neighbor_md)
+            # Get dip angle from reference interpretation (smoothed)
+            dip_angle = self._get_dip_angle_at_md(neighbor_well_name, neighbor_md, smoothing_range)
             if dip_angle is None:
                 continue  # Skip if no interpretation
 
@@ -339,10 +373,16 @@ class NeighborAngleAdvisor:
         well_name: str,
         md: float,
         azimuth_threshold_deg: float = 15.0,
-        max_neighbors: int = 3
+        max_neighbors: int = 3,
+        max_distance: float = 1000.0,  # Max distance to neighbor in meters
+        smoothing_range: float = 100.0  # Smoothing window for dip angle
     ) -> Optional[float]:
         """
         Get recommended dip angle as average of nearest neighbors.
+
+        Args:
+            max_distance: Maximum distance to neighbor (default 1000m = 1km)
+            smoothing_range: Window size for dip smoothing (default 100m = ±50m)
 
         Returns:
             Average dip angle in degrees, or None if no neighbors found
@@ -350,7 +390,9 @@ class NeighborAngleAdvisor:
         neighbors = self.find_neighbors(
             well_name, md,
             azimuth_threshold_deg=azimuth_threshold_deg,
-            max_neighbors=max_neighbors
+            max_neighbors=max_neighbors,
+            max_distance=max_distance,
+            smoothing_range=smoothing_range
         )
 
         if not neighbors:

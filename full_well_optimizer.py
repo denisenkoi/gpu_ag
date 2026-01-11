@@ -32,6 +32,7 @@ from smart_segmenter import SmartSegmenter
 from peak_detectors import OtsuPeakDetector, RegionFinder
 from numpy_funcs.interpretation import interpolate_shift_at_md
 from cpu_baseline.preprocessing import prepare_typelog, normalize_well_gr
+from neighbor_angle_advisor import NeighborAngleAdvisor
 import pandas as pd
 
 # Load SC baseline from CSV (once at module load)
@@ -945,6 +946,9 @@ def optimize_full_well(
     evo_maxiter: int = 50,  # Max iterations for evolutionary algorithms
     mc_samples: int = 4000000,  # Number of samples for Monte Carlo
     chunk_size: int = None,  # Auto-detect based on GPU model
+    advisor: NeighborAngleAdvisor = None,  # Neighbor angle advisor for dynamic center
+    advisor_max_dist: float = 1000.0,  # Max distance to neighbor for advisor (meters)
+    advisor_smoothing: float = 100.0,  # Smoothing window for neighbor dip (meters)
 ) -> List[OptimizedSegment]:
     """
     Optimize entire well from landing point to end using PELT-based segmentation.
@@ -1080,8 +1084,25 @@ def optimize_full_well(
             current_md = block_end
             continue
 
-        # Use trend angle (from landing to zone_start) instead of local block angle
-        traj_angle = trend_angle
+        # Determine center angle for this block
+        if advisor is not None:
+            # Use advisor recommendation as center (based on neighbor interpretations)
+            block_center_md = (current_md + block_end) / 2
+            advisor_dip = advisor.get_recommended_dip(
+                well_name, block_center_md,
+                max_neighbors=3,
+                max_distance=advisor_max_dist,
+                smoothing_range=advisor_smoothing
+            )
+            if advisor_dip is not None:
+                traj_angle = advisor_dip
+                if verbose:
+                    print(f"    Advisor: center_md={block_center_md:.0f}, rec_dip={advisor_dip:+.2f}°")
+            else:
+                traj_angle = trend_angle  # Fallback if no neighbors within max_distance
+        else:
+            # Use trend angle (from landing to zone_start) as before
+            traj_angle = trend_angle
 
         # Get SC baseline for this well
         sc_landing_rmse = get_sc_landing_rmse(well_name) if SC_ENABLED and sc_weight > 0 else 4.0
@@ -1220,12 +1241,19 @@ def test_single_well(well_name: str = "Well1221~EGFDL"):
 
 def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter: list = None, json_dir: str = None,
                    algorithm: str = 'BRUTEFORCE', evo_popsize: int = 100, evo_maxiter: int = 50,
-                   mc_samples: int = 4000000, mse_weight: float = 0.1):
+                   mc_samples: int = 4000000, mse_weight: float = 0.1, use_advisor: bool = False,
+                   advisor_max_dist: float = 1000.0, advisor_smoothing: float = 100.0):
     """Test on all 100 wells with CSV export after each well."""
     import csv
     from datetime import datetime
 
     ds = torch.load('dataset/gpu_ag_dataset.pt', weights_only=False)
+
+    # Initialize advisor if requested
+    advisor = None
+    if use_advisor:
+        advisor = NeighborAngleAdvisor('dataset/gpu_ag_dataset.pt')
+        print("Advisor enabled: using neighbor-based center angles")
 
     # Filter wells if specified
     if well_filter:
@@ -1309,6 +1337,9 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter:
             evo_popsize=evo_popsize,
             evo_maxiter=evo_maxiter,
             mc_samples=mc_samples,
+            advisor=advisor,
+            advisor_max_dist=advisor_max_dist,
+            advisor_smoothing=advisor_smoothing,
         )
 
         opt_ms = int((time.time() - t_opt_start) * 1000)
@@ -1471,6 +1502,9 @@ if __name__ == '__main__':
     parser.add_argument('--evo-maxiter', type=int, default=50, help='Max iterations for evolutionary algorithms')
     parser.add_argument('--mc-samples', type=int, default=4000000, help='Number of samples for Monte Carlo')
     parser.add_argument('--mse-weight', type=float, default=0.1, help='MSE weight in score formula')
+    parser.add_argument('--use-advisor', action='store_true', help='Use neighbor advisor for center angles')
+    parser.add_argument('--advisor-max-dist', type=float, default=1000.0, help='Max distance to neighbor for advisor (meters)')
+    parser.add_argument('--advisor-smoothing', type=float, default=100.0, help='Smoothing window for neighbor dip angle (meters)')
     args = parser.parse_args()
 
     # Detect GPU and check memory
@@ -1491,11 +1525,13 @@ if __name__ == '__main__':
         print("\n" + "="*70)
         test_all_wells(angle_range=args.angle_range, json_dir=args.json_dir,
                        algorithm=args.algorithm, evo_popsize=args.evo_popsize, evo_maxiter=args.evo_maxiter,
-                       mc_samples=args.mc_samples, mse_weight=args.mse_weight)
+                       mc_samples=args.mc_samples, mse_weight=args.mse_weight, use_advisor=args.use_advisor,
+                       advisor_max_dist=args.advisor_max_dist, advisor_smoothing=args.advisor_smoothing)
     elif args.wells:
         print("\n" + "="*70)
         test_all_wells(angle_range=args.angle_range, well_filter=args.wells, json_dir=args.json_dir,
                        algorithm=args.algorithm, evo_popsize=args.evo_popsize, evo_maxiter=args.evo_maxiter,
-                       mc_samples=args.mc_samples, mse_weight=args.mse_weight)
+                       mc_samples=args.mc_samples, mse_weight=args.mse_weight, use_advisor=args.use_advisor,
+                       advisor_max_dist=args.advisor_max_dist, advisor_smoothing=args.advisor_smoothing)
     else:
         test_single_well()
