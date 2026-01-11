@@ -335,6 +335,56 @@ def process_single_json(json_path: Path, device: str = 'cpu',
             incl87_md = raw_well_md[len(raw_well_md)//2]
         result['landing_end_87_200'] = incl87_md + 200
 
+        # Calculate landing_end_dls: DLS-based detection + 600ft
+        # Algorithm: find DLS>5, then find where incl reaches 87° and stabilizes
+        n_pts = len(raw_well_md)
+        dls_arr = np.zeros(n_pts)
+        incl_arr = np.zeros(n_pts)
+
+        for idx in range(1, n_pts):
+            delta_md = raw_well_md[idx] - raw_well_md[idx-1]
+            delta_tvd = raw_well_tvd[idx] - raw_well_tvd[idx-1]
+            if delta_md > 0.1:
+                incl_arr[idx] = 90 - np.degrees(np.arctan(abs(delta_tvd) / delta_md))
+                if idx > 1:
+                    angle_change = abs(incl_arr[idx] - incl_arr[idx-1])
+                    dls_arr[idx] = angle_change / delta_md * 30.48  # °/100ft
+
+        # Find first DLS > 5
+        dls_start_idx = None
+        for idx in range(1, n_pts):
+            if dls_arr[idx] > 5.0:
+                dls_start_idx = idx
+                break
+
+        if dls_start_idx is None:
+            # No DLS > 5, fallback to 87_200
+            result['landing_end_dls'] = result['landing_end_87_200']
+        else:
+            # Find where incl reaches 87° and stabilizes
+            landing_end_idx = dls_start_idx
+            reached_high_angle = False
+            window = 10
+
+            for idx in range(dls_start_idx, n_pts - window):
+                if incl_arr[idx] >= 87:
+                    reached_high_angle = True
+
+                if reached_high_angle:
+                    incl_change = incl_arr[idx + window] - incl_arr[idx]
+                    # Stabilized or overshoot detection
+                    if incl_change < 0.3:
+                        landing_end_idx = idx
+                        break
+                    if incl_arr[idx] > 89.5 and incl_arr[idx + window] < incl_arr[idx]:
+                        landing_end_idx = idx
+                        break
+            else:
+                # Never stabilized, use max incl point
+                landing_end_idx = int(np.argmax(incl_arr))
+
+            result['landing_end_dls'] = raw_well_md[landing_end_idx] + 182.88  # 600ft
+
         # Add landing and normalization if calculated
         if landing_norm:
             result['perch_md'] = landing_norm['perch_md']

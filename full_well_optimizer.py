@@ -400,6 +400,166 @@ def optimize_segment_block_gpu(
     return best_pearson, best_end_shift, best_angles, best_start_shift
 
 
+def optimize_segment_block_montecarlo(
+    segment_indices: List[Tuple[int, int]],
+    start_shift: float,
+    trajectory_angle: float,
+    well_md: np.ndarray,
+    well_tvd: np.ndarray,
+    well_gr: np.ndarray,
+    type_tvd: np.ndarray,
+    type_gr: np.ndarray,
+    angle_range: float = 1.5,
+    mse_weight: float = 0.1,
+    n_samples: int = 4000000,  # Default ~4M like BF
+    device: str = DEVICE,
+    chunk_size: int = None,
+    tvd_shift: float = 0.0,
+) -> Tuple[float, float, np.ndarray, float]:
+    """
+    Monte Carlo random search optimization for a block of segments.
+
+    Instead of exhaustive grid search (BF) or evolution (CMA-ES),
+    samples random angle combinations uniformly in [-angle_range, +angle_range].
+
+    Advantages over BF:
+    - Continuous angle space (not limited to grid step)
+    - Faster (no meshgrid overhead)
+    - Often finds better solutions
+
+    Returns: (best_pearson, best_end_shift, best_angles, best_start_shift)
+    """
+    if chunk_size is None:
+        chunk_size = get_chunk_size()
+
+    n_seg = len(segment_indices)
+
+    # Segment MD lengths
+    seg_md_lens = np.array([well_md[e] - well_md[s] for s, e in segment_indices], dtype=np.float32)
+
+    # Zone data
+    start_idx = segment_indices[0][0]
+    end_idx = segment_indices[-1][1]
+    n_points = end_idx - start_idx
+
+    zone_tvd = torch.tensor(well_tvd[start_idx:end_idx], device=device, dtype=GPU_DTYPE)
+    zone_gr = torch.tensor(well_gr[start_idx:end_idx], device=device, dtype=GPU_DTYPE)
+    zone_gr_centered = zone_gr - zone_gr.mean()
+    zone_gr_ss = (zone_gr_centered**2).sum()
+    zone_var = zone_gr.var()
+
+    type_tvd_t = torch.tensor(type_tvd, device=device, dtype=GPU_DTYPE)
+    type_gr_t = torch.tensor(type_gr, device=device, dtype=GPU_DTYPE)
+
+    # Precompute segment data
+    seg_data = []
+    for seg_i, (s_idx, e_idx) in enumerate(segment_indices):
+        local_start = s_idx - start_idx
+        local_end = e_idx - start_idx
+        seg_n = local_end - local_start
+        seg_tvd = torch.tensor(well_tvd[s_idx:e_idx], device=device, dtype=GPU_DTYPE)
+        md_start = well_md[s_idx]
+        md_end = well_md[e_idx - 1] if e_idx > s_idx else md_start
+        if md_end > md_start:
+            ratio = torch.tensor((well_md[s_idx:e_idx] - md_start) / (md_end - md_start),
+                                device=device, dtype=GPU_DTYPE)
+        else:
+            ratio = torch.zeros(seg_n, device=device, dtype=GPU_DTYPE)
+        seg_data.append((local_start, local_end, seg_n, seg_tvd, ratio))
+
+    seg_md_lens_t = torch.tensor(seg_md_lens, device=device, dtype=GPU_DTYPE)
+
+    MAX_TVT_EXTRAPOLATION = 0.1524  # 0.5 ft max extrapolation
+
+    best_score = -1e9
+    best_idx_global = 0
+    best_pearson = 0.0
+    best_angles_result = None
+    best_end_shift_result = 0.0
+
+    # Process in chunks
+    for chunk_start in range(0, n_samples, chunk_size):
+        chunk_n = min(chunk_size, n_samples - chunk_start)
+
+        # Random angles centered around trajectory_angle
+        chunk_angles = torch.rand(chunk_n, n_seg, device=device, dtype=GPU_DTYPE)
+        chunk_angles = chunk_angles * (2 * angle_range) + (trajectory_angle - angle_range)
+
+        # Compute shifts
+        shift_deltas = torch.tan(torch.deg2rad(chunk_angles)) * seg_md_lens_t
+        cumsum = torch.cumsum(shift_deltas, dim=1)
+        end_shifts = start_shift + cumsum
+        start_shifts_tensor = torch.cat([
+            torch.full((chunk_n, 1), start_shift, device=device, dtype=GPU_DTYPE),
+            end_shifts[:, :-1]
+        ], dim=1)
+
+        # Build synthetic
+        synthetic = torch.zeros((chunk_n, n_points), device=device, dtype=GPU_DTYPE)
+        out_of_range_mask = torch.zeros(chunk_n, dtype=torch.bool, device=device)
+
+        for seg_i, (local_start, local_end, seg_n, seg_tvd, ratio) in enumerate(seg_data):
+            seg_start = start_shifts_tensor[:, seg_i:seg_i+1]
+            seg_end = end_shifts[:, seg_i:seg_i+1]
+            seg_shifts = seg_start + ratio.unsqueeze(0) * (seg_end - seg_start)
+
+            tvt = seg_tvd.unsqueeze(0) - seg_shifts
+
+            # Check out of range
+            below_min = type_tvd_t[0] - tvt
+            above_max = tvt - type_tvd_t[-1]
+            max_below = below_min.max(dim=1).values
+            max_above = above_max.max(dim=1).values
+            out_of_range_mask |= (max_below > MAX_TVT_EXTRAPOLATION) | (max_above > MAX_TVT_EXTRAPOLATION)
+
+            tvt_clamped = torch.clamp(tvt, type_tvd_t[0], type_tvd_t[-1])
+
+            indices = torch.searchsorted(type_tvd_t, tvt_clamped.reshape(-1))
+            indices = torch.clamp(indices, 1, len(type_tvd_t) - 1)
+
+            tvd_low = type_tvd_t[indices - 1]
+            tvd_high = type_tvd_t[indices]
+            gr_low = type_gr_t[indices - 1]
+            gr_high = type_gr_t[indices]
+
+            t = (tvt_clamped.reshape(-1) - tvd_low) / (tvd_high - tvd_low + 1e-10)
+            interp_gr = gr_low + t * (gr_high - gr_low)
+            synthetic[:, local_start:local_end] = interp_gr.reshape(chunk_n, seg_n)
+
+        # Pearson
+        synthetic_centered = synthetic - synthetic.mean(dim=1, keepdim=True)
+        numer = (zone_gr_centered * synthetic_centered).sum(dim=1)
+        denom = torch.sqrt(zone_gr_ss * (synthetic_centered**2).sum(dim=1))
+        pearsons = torch.where(denom > 1e-10, numer / denom, torch.zeros_like(numer))
+
+        # MSE
+        mse = ((zone_gr - synthetic)**2).mean(dim=1)
+        mse_norm = mse / (zone_var + 1e-10)
+
+        # Score
+        scores = pearsons - mse_weight * mse_norm
+
+        # Discard out of range
+        scores = torch.where(out_of_range_mask, torch.tensor(-1e9, device=device, dtype=scores.dtype), scores)
+
+        # Find best in chunk
+        chunk_best_idx = torch.argmax(scores).item()
+        chunk_best_score = scores[chunk_best_idx].item()
+
+        if chunk_best_score > best_score:
+            best_score = chunk_best_score
+            best_pearson = pearsons[chunk_best_idx].item()
+            best_angles_result = chunk_angles[chunk_best_idx].cpu().numpy()
+            best_end_shift_result = end_shifts[chunk_best_idx, -1].item()
+
+        # Cleanup
+        del chunk_angles, shift_deltas, cumsum, end_shifts, start_shifts_tensor
+        del synthetic, synthetic_centered, numer, denom, pearsons, mse, mse_norm, scores
+        torch.cuda.empty_cache()
+
+    return best_pearson, best_end_shift_result, best_angles_result, start_shift
+
+
 def optimize_segment_block_evolutionary(
     segment_indices: List[Tuple[int, int]],
     start_shift: float,
@@ -423,10 +583,19 @@ def optimize_segment_block_evolutionary(
 
     Returns: (best_pearson, best_end_shift, best_angles, best_start_shift)
     """
+    n_seg = len(segment_indices)
+
+    # CMA-ES doesn't work well with 1D problems - use brute-force instead
+    if n_seg <= 1:
+        return optimize_segment_block_gpu(
+            segment_indices, start_shift, trajectory_angle,
+            well_md, well_tvd, well_gr, type_tvd, type_gr,
+            angle_range=angle_range, mse_weight=mse_weight,
+            device=device, tvd_shift=tvd_shift
+        )
+
     from evotorch import Problem
     from evotorch.algorithms import CMAES, SNES
-
-    n_seg = len(segment_indices)
 
     # Segment MD lengths
     seg_md_lens = np.array([well_md[e] - well_md[s] for s, e in segment_indices], dtype=np.float32)
@@ -505,7 +674,7 @@ def optimize_segment_block_evolutionary(
 
         # Track solutions that go too far outside TypeLog range
         MAX_TVT_EXTRAPOLATION = 0.1524  # 0.5 ft max extrapolation
-        out_of_range_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        out_of_range_conditions = []
 
         for seg_i, (local_start, local_end, seg_n, seg_tvd, ratio) in enumerate(seg_data):
             seg_start = start_shifts[:, seg_i:seg_i+1]
@@ -519,7 +688,7 @@ def optimize_segment_block_evolutionary(
             above_max = tvt - type_tvd_t[-1]  # positive if above range
             max_below = below_min.max(dim=1).values
             max_above = above_max.max(dim=1).values
-            out_of_range_mask |= (max_below > MAX_TVT_EXTRAPOLATION) | (max_above > MAX_TVT_EXTRAPOLATION)
+            out_of_range_conditions.append((max_below > MAX_TVT_EXTRAPOLATION) | (max_above > MAX_TVT_EXTRAPOLATION))
 
             tvt_clamped = torch.clamp(tvt, type_tvd_t[0], type_tvd_t[-1])
 
@@ -551,17 +720,18 @@ def optimize_segment_block_evolutionary(
         loss = -pearsons + mse_weight * mse_norm + angle_penalty
 
         # Penalize solutions that exceed TypeLog range
-        loss = torch.where(out_of_range_mask, torch.tensor(1e9, device=device, dtype=loss.dtype), loss)
+        if out_of_range_conditions:
+            out_of_range_mask = torch.stack(out_of_range_conditions, dim=0).any(dim=0)
+            loss = torch.where(out_of_range_mask, torch.tensor(1e9, device=device, dtype=loss.dtype), loss)
 
         if squeeze_output:
             return loss.squeeze(0)
         return loss
 
-    # Define EvoTorch Problem
+    # Define EvoTorch Problem with batch evaluation for GPU
     class BlockOptProblem(Problem):
         def __init__(self):
             super().__init__(
-                objective_func=self._evaluate,
                 objective_sense='min',
                 solution_length=n_seg,
                 initial_bounds=(-angle_range, angle_range),
@@ -569,18 +739,22 @@ def optimize_segment_block_evolutionary(
                 dtype=GPU_DTYPE,
             )
 
-        def _evaluate(self, solutions):
-            x = solutions.values
-            fitness = objective_fn(x)
+        def _evaluate_batch(self, solutions):
+            """Batch evaluation on GPU - all solutions at once."""
+            x = solutions.values  # (popsize, n_seg)
+            fitness = objective_fn(x)  # (popsize,)
             solutions.set_evals(fitness)
 
     problem = BlockOptProblem()
 
     # Select algorithm
+    # Use full angle_range as stdev to explore edges (global optimum often at edges)
+    # Explicitly set center_init to 0 (relative) = trajectory_angle (absolute)
+    center_init = torch.zeros(n_seg, device=device, dtype=GPU_DTYPE)
     if algorithm.upper() == 'SNES':
-        searcher = SNES(problem, popsize=popsize, stdev_init=angle_range / 2)
+        searcher = SNES(problem, popsize=popsize, stdev_init=angle_range, center_init=center_init)
     else:  # CMAES
-        searcher = CMAES(problem, popsize=popsize, stdev_init=angle_range / 2)
+        searcher = CMAES(problem, popsize=popsize, stdev_init=angle_range, center_init=center_init)
 
     # Run optimization and track best
     best_fun = float('inf')
@@ -766,9 +940,10 @@ def optimize_full_well(
     end_zone_angle_reduction: float = 0.5,  # Reduce angle_range near end
     start_from_landing: bool = True,  # Start from landing_end_87_200 instead of OTSU
     verbose: bool = False,
-    algorithm: str = 'BRUTEFORCE',  # BRUTEFORCE, CMAES, or SNES
+    algorithm: str = 'BRUTEFORCE',  # BRUTEFORCE, CMAES, SNES, or MONTECARLO
     evo_popsize: int = 100,  # Population size for evolutionary algorithms
     evo_maxiter: int = 50,  # Max iterations for evolutionary algorithms
+    mc_samples: int = 4000000,  # Number of samples for Monte Carlo
     chunk_size: int = None,  # Auto-detect based on GPU model
 ) -> List[OptimizedSegment]:
     """
@@ -925,6 +1100,18 @@ def optimize_full_well(
                 maxiter=evo_maxiter,
                 tvd_shift=tvd_shift,
             )
+        elif algorithm.upper() == 'MONTECARLO':
+            # Monte Carlo random search
+            pearson, end_shift, best_angles, _ = optimize_segment_block_montecarlo(
+                seg_indices, current_shift, traj_angle,
+                well_md, well_tvd, well_gr,
+                type_tvd, type_gr,
+                angle_range=effective_angle_range,
+                mse_weight=mse_weight,
+                n_samples=mc_samples,
+                chunk_size=chunk_size,
+                tvd_shift=tvd_shift,
+            )
         else:
             # Brute-force (default)
             pearson, end_shift, best_angles, _ = optimize_segment_block_gpu(
@@ -1031,7 +1218,9 @@ def test_single_well(well_name: str = "Well1221~EGFDL"):
         print(f"Time: {t1-t0:.1f}s")
 
 
-def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter: list = None, json_dir: str = None):
+def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter: list = None, json_dir: str = None,
+                   algorithm: str = 'BRUTEFORCE', evo_popsize: int = 100, evo_maxiter: int = 50,
+                   mc_samples: int = 4000000, mse_weight: float = 0.1):
     """Test on all 100 wells with CSV export after each well."""
     import csv
     from datetime import datetime
@@ -1114,7 +1303,12 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter:
         segments = optimize_full_well(
             well_name, well_data,
             angle_range=angle_range,
+            mse_weight=mse_weight,
             verbose=False,
+            algorithm=algorithm,
+            evo_popsize=evo_popsize,
+            evo_maxiter=evo_maxiter,
+            mc_samples=mc_samples,
         )
 
         opt_ms = int((time.time() - t_opt_start) * 1000)
@@ -1270,6 +1464,13 @@ if __name__ == '__main__':
     parser.add_argument('--chunk-size', type=int, default=None, help='Override chunk size')
     parser.add_argument('--skip-memory-check', action='store_true', help='Skip GPU memory check')
     parser.add_argument('--json-dir', type=str, default=None, help='Directory to save JSON interpretations')
+    parser.add_argument('--algorithm', type=str, default='BRUTEFORCE',
+                        choices=['BRUTEFORCE', 'CMAES', 'SNES', 'MONTECARLO'],
+                        help='Optimization algorithm (default: BRUTEFORCE)')
+    parser.add_argument('--evo-popsize', type=int, default=100, help='Population size for evolutionary algorithms')
+    parser.add_argument('--evo-maxiter', type=int, default=50, help='Max iterations for evolutionary algorithms')
+    parser.add_argument('--mc-samples', type=int, default=4000000, help='Number of samples for Monte Carlo')
+    parser.add_argument('--mse-weight', type=float, default=0.1, help='MSE weight in score formula')
     args = parser.parse_args()
 
     # Detect GPU and check memory
@@ -1288,9 +1489,13 @@ if __name__ == '__main__':
 
     if args.all:
         print("\n" + "="*70)
-        test_all_wells(angle_range=args.angle_range, json_dir=args.json_dir)
+        test_all_wells(angle_range=args.angle_range, json_dir=args.json_dir,
+                       algorithm=args.algorithm, evo_popsize=args.evo_popsize, evo_maxiter=args.evo_maxiter,
+                       mc_samples=args.mc_samples, mse_weight=args.mse_weight)
     elif args.wells:
         print("\n" + "="*70)
-        test_all_wells(angle_range=args.angle_range, well_filter=args.wells, json_dir=args.json_dir)
+        test_all_wells(angle_range=args.angle_range, well_filter=args.wells, json_dir=args.json_dir,
+                       algorithm=args.algorithm, evo_popsize=args.evo_popsize, evo_maxiter=args.evo_maxiter,
+                       mc_samples=args.mc_samples, mse_weight=args.mse_weight)
     else:
         test_single_well()
