@@ -243,14 +243,17 @@ def optimize_segment_block_gpu(
     # Segment MD lengths (needed for adaptive step)
     seg_md_lens = np.array([well_md[e] - well_md[s] for s, e in segment_indices], dtype=np.float32)
 
-    # Generate angle candidates with fixed step (adaptive step disabled for quick tests)
-    # LONG_SEGMENT_THRESHOLD = 50.0  # meters
-    # FINE_ANGLE_STEP = 0.1  # degrees for long segments
+    # Generate angle candidates (adaptive step for long segments)
+    LONG_SEGMENT_THRESHOLD = 50.0  # meters
+    FINE_ANGLE_STEP = 0.1  # degrees for long segments
 
     angle_grids = []
     for seg_len in seg_md_lens:
-        # Adaptive step disabled - use fixed angle_step for all segments
-        step = angle_step
+        # Adaptive step: 0.1° for long segments, default for short
+        if seg_len > LONG_SEGMENT_THRESHOLD:
+            step = FINE_ANGLE_STEP
+        else:
+            step = angle_step
         n_steps = int(2 * angle_range / step) + 1
         grid = np.linspace(
             trajectory_angle - angle_range,
@@ -272,6 +275,10 @@ def optimize_segment_block_gpu(
     start_idx = segment_indices[0][0]
     end_idx = segment_indices[-1][1]
     n_points = end_idx - start_idx
+
+    # Debug: log block stats
+    mem_per_chunk_gb = chunk_size * n_points * 4 / 1e9
+    print(f"    Block: {n_seg} segs, grid_sizes={grid_sizes}, n_combos={n_combos:,}, n_points={n_points}, mem/chunk={mem_per_chunk_gb:.2f}GB", flush=True)
 
     zone_tvd = torch.tensor(well_tvd[start_idx:end_idx], device=device, dtype=GPU_DTYPE)
     zone_gr = torch.tensor(well_gr[start_idx:end_idx], device=device, dtype=GPU_DTYPE)
@@ -406,14 +413,16 @@ def optimize_segment_block_gpu(
             best_idx_global = chunk_start + chunk_best_idx
             best_pearson = pearsons[chunk_best_idx].item()
 
-        # Cleanup chunk tensors to prevent VRAM leak (del is enough, no empty_cache in loop!)
+        # Cleanup chunk tensors to prevent VRAM leak
         del indices, chunk_angles, chunk_start_shifts, seg_md_lens_t, shift_deltas
         del cumsum, end_shifts, start_shifts, synthetic, synthetic_centered
         del numer, denom, pearsons, mse, mse_norm, scores
         if all_tvt is not None:
             del all_tvt
 
-    # Cleanup grids from GPU (empty_cache only once after all chunks)
+        # No periodic empty_cache - testing VRAM behavior
+
+    # Cleanup grids from GPU
     del grids_gpu
     torch.cuda.empty_cache()
 
@@ -1359,6 +1368,7 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter:
             evo_popsize=evo_popsize,
             evo_maxiter=evo_maxiter,
             mc_samples=mc_samples,
+            chunk_size=chunk_size,
             advisor=advisor,
             advisor_max_dist=advisor_max_dist,
             advisor_smoothing=advisor_smoothing,

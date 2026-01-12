@@ -117,6 +117,10 @@ def detect_peaks_valleys(curve: np.ndarray, md: np.ndarray,
 
     threshold = pmin + (best_t / 255) * (pmax - pmin)
 
+    # Apply threshold multiplier from env (lower = more peaks detected)
+    threshold_mult = float(os.getenv('OTSU_THRESHOLD_MULT', '1.0'))
+    threshold = threshold * threshold_mult
+
     # Collect significant points
     points = []
 
