@@ -1,5 +1,11 @@
 """
-GR utility functions - shared filtering logic.
+GR Smoothing Module - Savitzky-Golay filtering for gamma ray signals.
+
+Functions:
+    calc_shit_score(): Analyze GR signal quality (quantization, steps, repeats)
+    get_adaptive_window(): Select smoothing window (5/11/15) based on quality score
+    smooth_gr(): Apply Savitzky-Golay filter with specified or auto window
+    apply_gr_smoothing(): Legacy function using .env settings
 """
 
 import os
@@ -115,6 +121,35 @@ def get_adaptive_window(gr_values: np.ndarray) -> int:
         return 5
 
 
+def smooth_gr(values: np.ndarray, window: int = None, order: int = 2) -> np.ndarray:
+    """
+    Apply Savitzky-Golay smoothing to GR values.
+
+    Args:
+        values: GR array to smooth
+        window: Window size (must be odd, >= 3). If None, uses adaptive window.
+        order: Polynomial order (default 2)
+
+    Returns:
+        Smoothed GR array
+    """
+    if window is None:
+        window = get_adaptive_window(values)
+
+    if window < 3:
+        return values
+
+    # Window must be odd
+    if window % 2 == 0:
+        window += 1
+
+    # Order must be less than window
+    if order >= window:
+        order = window - 1
+
+    return savgol_filter(values, window, order)
+
+
 def apply_gr_smoothing_adaptive(values: np.ndarray, order: int = 2) -> tuple:
     """
     Apply adaptive GR smoothing based on signal quality.
@@ -124,11 +159,5 @@ def apply_gr_smoothing_adaptive(values: np.ndarray, order: int = 2) -> tuple:
     """
     score = calc_shit_score(values)
     window = get_adaptive_window(values)
-
-    if window % 2 == 0:
-        window += 1
-    if order >= window:
-        order = window - 1
-
-    smoothed = savgol_filter(values, window, order)
+    smoothed = smooth_gr(values, window, order)
     return smoothed, window, score

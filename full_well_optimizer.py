@@ -32,9 +32,8 @@ from torch_funcs.converters import GPU_DTYPE
 from smart_segmenter import SmartSegmenter
 from peak_detectors import OtsuPeakDetector, RegionFinder
 from numpy_funcs.interpretation import interpolate_shift_at_md
-from cpu_baseline.preprocessing import prepare_typelog, normalize_well_gr
+from cpu_baseline.preprocessing import prepare_typelog
 from neighbor_angle_advisor import NeighborAngleAdvisor
-from gr_utils import calc_shit_score, get_adaptive_window, apply_gr_smoothing_adaptive
 import pandas as pd
 
 # Load SC baseline from CSV (once at module load)
@@ -244,17 +243,14 @@ def optimize_segment_block_gpu(
     # Segment MD lengths (needed for adaptive step)
     seg_md_lens = np.array([well_md[e] - well_md[s] for s, e in segment_indices], dtype=np.float32)
 
-    # Generate angle candidates with adaptive step for long segments
-    # Long segments (>50m) use finer step (0.1°) to reduce discretization error
-    LONG_SEGMENT_THRESHOLD = 50.0  # meters
-    FINE_ANGLE_STEP = 0.1  # degrees for long segments
+    # Generate angle candidates with fixed step (adaptive step disabled for quick tests)
+    # LONG_SEGMENT_THRESHOLD = 50.0  # meters
+    # FINE_ANGLE_STEP = 0.1  # degrees for long segments
 
     angle_grids = []
     for seg_len in seg_md_lens:
-        if seg_len > LONG_SEGMENT_THRESHOLD:
-            step = FINE_ANGLE_STEP
-        else:
-            step = angle_step
+        # Adaptive step disabled - use fixed angle_step for all segments
+        step = angle_step
         n_steps = int(2 * angle_range / step) + 1
         grid = np.linspace(
             trajectory_angle - angle_range,
@@ -410,16 +406,16 @@ def optimize_segment_block_gpu(
             best_idx_global = chunk_start + chunk_best_idx
             best_pearson = pearsons[chunk_best_idx].item()
 
-        # Cleanup chunk tensors to prevent VRAM leak
+        # Cleanup chunk tensors to prevent VRAM leak (del is enough, no empty_cache in loop!)
         del indices, chunk_angles, chunk_start_shifts, seg_md_lens_t, shift_deltas
         del cumsum, end_shifts, start_shifts, synthetic, synthetic_centered
         del numer, denom, pearsons, mse, mse_norm, scores
         if all_tvt is not None:
             del all_tvt
-        torch.cuda.empty_cache()
 
-    # Cleanup grids from GPU
+    # Cleanup grids from GPU (empty_cache only once after all chunks)
     del grids_gpu
+    torch.cuda.empty_cache()
 
     # Get best result - reconstruct angles from flat index
     best_start_shift = start_shift  # all combinations use same start_shift
@@ -1010,55 +1006,25 @@ def optimize_full_well(
     Returns:
         List of OptimizedSegment from start to well end
     """
-    # Extract data
-    well_md = well_data['well_md'].numpy()
-    well_tvd = well_data['well_tvd'].numpy()
-    log_md = well_data['log_md'].numpy()
-    log_gr = well_data['log_gr'].numpy()
-
-    # Calculate adaptive smoothing window BEFORE any processing
-    smoothing_window_used = 0
-    shit_score = 0.0
-    if adaptive_smoothing:
-        from scipy.signal import savgol_filter
-        shit_score = calc_shit_score(log_gr)  # Calculate on raw log_gr
-        smoothing_window_used = get_adaptive_window(log_gr)
-        if smoothing_window_used >= 3:
-            # Apply smoothing to log_gr BEFORE interpolation
-            log_gr = savgol_filter(log_gr, smoothing_window_used, 2)
-            if verbose:
-                print(f"  Adaptive smoothing: shit_score={shit_score:.3f} -> window={smoothing_window_used}")
-
-    # Get typewell (tvd_shift will be applied in optimizer, not here)
-    # Note: apply_smoothing=False if adaptive, we'll apply manually with same window
+    # Get prepared data (TypeLog, WellLog with smoothing applied in preprocessing)
     type_tvd, type_gr, typelog_meta = prepare_typelog(
         well_data,
         use_pseudo=USE_PSEUDO_TYPELOG,
-        apply_smoothing=not adaptive_smoothing  # Skip if we do adaptive
+        apply_smoothing=not adaptive_smoothing,  # Fixed window from env if not adaptive
+        adaptive_smoothing=adaptive_smoothing,   # Auto window 5/11/15 based on GR quality
     )
 
-    # Apply adaptive smoothing to type_gr as well
-    if adaptive_smoothing and smoothing_window_used >= 3:
-        from scipy.signal import savgol_filter
-        type_gr = savgol_filter(type_gr, smoothing_window_used, 2)
+    if verbose and adaptive_smoothing:
+        print(f"  Adaptive smoothing: shit_score={typelog_meta['shit_score']:.3f} -> window={typelog_meta['smoothing_window']}")
+
+    # Extract arrays from metadata (preprocessing handles normalization and smoothing)
+    well_md = typelog_meta['well_md']
+    well_gr = typelog_meta['well_gr_norm']  # Already normalized and smoothed
+    well_tvd = well_data['well_tvd'].numpy()
+    log_md = well_data['log_md'].numpy()
 
     # tvd_shift from metadata - honest mode without data leakage
-    # TESTED 2026-01-08:
-    #   - with shift (honest): RMSE=6.80m, overlap Pearson=0.743
-    #   - with shift=0 (leakage): RMSE=4.16m, overlap Pearson=0.364
-    # shift=0 gives better RMSE but uses future data (ref_shift computed with tvd_shift)
-    # Using honest mode now - worse RMSE but no leakage
     tvd_shift = typelog_meta['tvd_shift']
-
-    # Interpolate GR to well_md and apply same normalization as TypeLog
-    well_gr = np.interp(well_md, log_md, log_gr)
-    norm_multiplier = float(well_data.get('norm_multiplier', 1.0))
-    well_gr = normalize_well_gr(
-        well_gr,
-        norm_multiplier,
-        typelog_meta['gr_min'],
-        typelog_meta['gr_max']
-    )
 
     # Determine start point
     if start_from_landing:

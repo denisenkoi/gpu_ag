@@ -27,10 +27,15 @@ Date: 2026-01-10
 """
 
 import os
+import sys
 import logging
 import numpy as np
 from typing import Dict, Any, Tuple, NamedTuple
-from scipy.signal import savgol_filter
+from pathlib import Path
+
+# Add parent dir to path for gr_smoothing import
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from gr_smoothing import calc_shit_score, get_adaptive_window, smooth_gr
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +63,8 @@ class PreparedData(NamedTuple):
     gr_max: float
     norm_multiplier: float
     use_pseudo: bool
+    smoothing_window: int  # Savitzky-Golay window used (0 if disabled)
+    shit_score: float  # GR quality score (0=good, 1=bad)
     normalized_0_100: bool
     overlap_metrics: Dict[str, float]
 
@@ -265,7 +272,8 @@ def prepare_data(
     well_data: Dict[str, Any],
     use_pseudo: bool = None,
     normalize_0_100: bool = None,
-    apply_smoothing: bool = True
+    apply_smoothing: bool = True,
+    adaptive_smoothing: bool = False,
 ) -> PreparedData:
     """
     Prepare all data for optimizer.
@@ -276,7 +284,8 @@ def prepare_data(
         well_data: Well data from dataset (tensors)
         use_pseudo: Use PseudoTypeLog stitching (default from USE_PSEUDO_TYPELOG env)
         normalize_0_100: Normalize to 0-100 scale (default from NORMALIZE_0_100 env)
-        apply_smoothing: Apply Savitzky-Golay filter to TypeLog
+        apply_smoothing: Apply Savitzky-Golay filter using GR_SMOOTHING_WINDOW env
+        adaptive_smoothing: Auto-select smoothing window (5/11/15) based on GR quality
 
     Returns:
         PreparedData with all arrays and metadata
@@ -348,9 +357,32 @@ def prepare_data(
         logger.debug(f"TypeLog only: {len(result_tvd)} points")
 
     # === Step 7: Apply smoothing ===
-    if apply_smoothing and GR_SMOOTHING_WINDOW >= 3:
+    smoothing_window = 0
+    shit_score = 0.0
+
+    if adaptive_smoothing:
+        # Analyze well_gr quality to determine smoothing window
+        shit_score = calc_shit_score(well_gr)
+        smoothing_window = get_adaptive_window(well_gr)
+
+        # Get smoothing config from env (for experiments)
+        welllog_window = int(os.environ.get('SMOOTH_WELLLOG', '5'))
+        typelog_window = int(os.environ.get('SMOOTH_TYPELOG', '5'))
+
+        # WellLog smoothing
+        if welllog_window >= 3:
+            well_gr = smooth_gr(well_gr, window=welllog_window)
+        # TypeLog smoothing
+        if typelog_window >= 3:
+            result_gr = smooth_gr(result_gr, window=typelog_window)
+
+        logger.debug(f"Adaptive smoothing: shit_score={shit_score:.3f}, well_window={welllog_window}, type_window={typelog_window}")
+
+    elif apply_smoothing and GR_SMOOTHING_WINDOW >= 3:
+        # Legacy: fixed window from env (type_gr only)
+        smoothing_window = GR_SMOOTHING_WINDOW
         result_gr = apply_gr_smoothing(result_gr)
-        logger.debug(f"Smoothing applied (window={GR_SMOOTHING_WINDOW})")
+        logger.debug(f"Fixed smoothing applied (window={GR_SMOOTHING_WINDOW})")
 
     return PreparedData(
         type_tvd=result_tvd,
@@ -363,6 +395,8 @@ def prepare_data(
         gr_max=gr_max,
         norm_multiplier=norm_multiplier,
         use_pseudo=use_pseudo,
+        smoothing_window=smoothing_window,
+        shit_score=shit_score,
         normalized_0_100=normalize_0_100,
         overlap_metrics=overlap_metrics,
     )
@@ -374,14 +408,27 @@ def prepare_data(
 def prepare_typelog(
     data: Dict[str, Any],
     use_pseudo: bool = None,
-    apply_smoothing: bool = True
+    apply_smoothing: bool = True,
+    adaptive_smoothing: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, Dict]:
     """
-    DEPRECATED: Use prepare_data() instead.
+    Prepare TypeLog and metadata for optimizer.
 
-    Kept for backward compatibility with full_well_optimizer.py
+    Args:
+        data: Well data from dataset
+        use_pseudo: Use PseudoTypeLog stitching
+        apply_smoothing: Apply fixed smoothing from GR_SMOOTHING_WINDOW env
+        adaptive_smoothing: Auto-select smoothing window based on GR quality
+
+    Returns:
+        (type_tvd, type_gr, metadata)
     """
-    prepared = prepare_data(data, use_pseudo=use_pseudo, apply_smoothing=apply_smoothing)
+    prepared = prepare_data(
+        data,
+        use_pseudo=use_pseudo,
+        apply_smoothing=apply_smoothing,
+        adaptive_smoothing=adaptive_smoothing,
+    )
 
     metadata = {
         'gr_min': prepared.gr_min,
@@ -391,8 +438,10 @@ def prepare_typelog(
         'use_pseudo': prepared.use_pseudo,
         'overlap_metrics': prepared.overlap_metrics,
         'n_points': len(prepared.type_tvd),
-        'well_gr_norm': prepared.well_gr,  # Now properly normalized!
+        'well_gr_norm': prepared.well_gr,  # Normalized and smoothed (if adaptive)
         'well_md': prepared.well_md,
+        'smoothing_window': prepared.smoothing_window,
+        'shit_score': prepared.shit_score,
     }
 
     return prepared.type_tvd, prepared.type_gr, metadata
