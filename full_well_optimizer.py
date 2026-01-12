@@ -20,6 +20,7 @@ import time
 import json
 import torch
 import numpy as np
+from itertools import product as itertools_product
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
@@ -33,6 +34,7 @@ from peak_detectors import OtsuPeakDetector, RegionFinder
 from numpy_funcs.interpretation import interpolate_shift_at_md
 from cpu_baseline.preprocessing import prepare_typelog, normalize_well_gr
 from neighbor_angle_advisor import NeighborAngleAdvisor
+from gr_utils import calc_shit_score, get_adaptive_window, apply_gr_smoothing_adaptive
 import pandas as pd
 
 # Load SC baseline from CSV (once at module load)
@@ -60,8 +62,8 @@ DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 # NOTE: 5090 degrades badly at chunk_size=500k (55s vs 8s)
 # Conservative settings for stability
 GPU_CONFIGS = {
-    '3090': {'chunk_size': 70000, 'min_free_gb': 15},
-    '5090': {'chunk_size': 100000, 'min_free_gb': 20},
+    '3090': {'chunk_size': 200000, 'min_free_gb': 15},
+    '5090': {'chunk_size': 300000, 'min_free_gb': 20},
     'default': {'chunk_size': 70000, 'min_free_gb': 10},
 }
 
@@ -239,25 +241,36 @@ def optimize_segment_block_gpu(
 
     n_seg = len(segment_indices)
 
-    # Generate angle candidates
-    angle_steps = int(2 * angle_range / angle_step) + 1
-    angles = np.linspace(
-        trajectory_angle - angle_range,
-        trajectory_angle + angle_range,
-        angle_steps
-    )
-
-    # Fixed start_shift (no search)
-    start_shifts_arr = np.array([start_shift])
-
-    # Meshgrid
-    grids = np.meshgrid(*[angles]*n_seg, start_shifts_arr, indexing='ij')
-    all_angles_np = np.stack([g.ravel() for g in grids[:-1]], axis=1).astype(np.float32)
-    all_start_shifts_np = grids[-1].ravel().astype(np.float32)
-    n_combos = all_angles_np.shape[0]
-
-    # Segment MD lengths
+    # Segment MD lengths (needed for adaptive step)
     seg_md_lens = np.array([well_md[e] - well_md[s] for s, e in segment_indices], dtype=np.float32)
+
+    # Generate angle candidates with adaptive step for long segments
+    # Long segments (>50m) use finer step (0.1°) to reduce discretization error
+    LONG_SEGMENT_THRESHOLD = 50.0  # meters
+    FINE_ANGLE_STEP = 0.1  # degrees for long segments
+
+    angle_grids = []
+    for seg_len in seg_md_lens:
+        if seg_len > LONG_SEGMENT_THRESHOLD:
+            step = FINE_ANGLE_STEP
+        else:
+            step = angle_step
+        n_steps = int(2 * angle_range / step) + 1
+        grid = np.linspace(
+            trajectory_angle - angle_range,
+            trajectory_angle + angle_range,
+            n_steps
+        )
+        angle_grids.append(grid)
+
+    # Compute total combinations and grid sizes (for GPU generation)
+    grid_sizes = [len(g) for g in angle_grids]
+    n_combos = 1
+    for s in grid_sizes:
+        n_combos *= s
+
+    # Transfer grids to GPU once (small memory: ~200 floats total)
+    grids_gpu = [torch.tensor(g, device=device, dtype=GPU_DTYPE) for g in angle_grids]
 
     # Zone data
     start_idx = segment_indices[0][0]
@@ -294,12 +307,25 @@ def optimize_segment_block_gpu(
     best_idx_global = 0
     best_pearson = 0.0
 
-    # Process in chunks
+    # Process in chunks - generate combinations directly on GPU (no RAM for full array!)
     for chunk_start in range(0, n_combos, chunk_size):
         chunk_end = min(chunk_start + chunk_size, n_combos)
-        chunk_angles = torch.tensor(all_angles_np[chunk_start:chunk_end], device=device, dtype=GPU_DTYPE)
-        chunk_start_shifts = torch.tensor(all_start_shifts_np[chunk_start:chunk_end], device=device, dtype=GPU_DTYPE)
-        chunk_n = chunk_angles.shape[0]
+        chunk_n = chunk_end - chunk_start
+
+        # Generate angle combinations on GPU from flat indices
+        # Formula: for index i, compute multi-index (i0, i1, ..., i_{n-1}) where
+        # i_k = (i // prod(sizes[k+1:])) % sizes[k]
+        indices = torch.arange(chunk_start, chunk_end, device=device, dtype=torch.long)
+        chunk_angles = torch.zeros((chunk_n, n_seg), device=device, dtype=GPU_DTYPE)
+
+        divisor = 1
+        for seg in reversed(range(n_seg)):
+            seg_indices = (indices // divisor) % grid_sizes[seg]
+            chunk_angles[:, seg] = grids_gpu[seg][seg_indices]
+            divisor *= grid_sizes[seg]
+
+        # All combinations use same start_shift
+        chunk_start_shifts = torch.full((chunk_n,), start_shift, device=device, dtype=GPU_DTYPE)
 
         # Compute shifts
         seg_md_lens_t = torch.tensor(seg_md_lens, device=device, dtype=GPU_DTYPE)
@@ -385,16 +411,25 @@ def optimize_segment_block_gpu(
             best_pearson = pearsons[chunk_best_idx].item()
 
         # Cleanup chunk tensors to prevent VRAM leak
-        del chunk_angles, chunk_start_shifts, seg_md_lens_t, shift_deltas
+        del indices, chunk_angles, chunk_start_shifts, seg_md_lens_t, shift_deltas
         del cumsum, end_shifts, start_shifts, synthetic, synthetic_centered
         del numer, denom, pearsons, mse, mse_norm, scores
         if all_tvt is not None:
             del all_tvt
         torch.cuda.empty_cache()
 
-    # Get best result
-    best_start_shift = float(all_start_shifts_np[best_idx_global])
-    best_angles = all_angles_np[best_idx_global]
+    # Cleanup grids from GPU
+    del grids_gpu
+
+    # Get best result - reconstruct angles from flat index
+    best_start_shift = start_shift  # all combinations use same start_shift
+    best_angles = np.zeros(n_seg, dtype=np.float32)
+    divisor = 1
+    for seg in reversed(range(n_seg)):
+        seg_idx = (best_idx_global // divisor) % grid_sizes[seg]
+        best_angles[seg] = angle_grids[seg][seg_idx]
+        divisor *= grid_sizes[seg]
+
     best_shift_deltas = np.tan(np.radians(best_angles)) * seg_md_lens
     best_end_shift = best_start_shift + np.sum(best_shift_deltas)
 
@@ -949,6 +984,7 @@ def optimize_full_well(
     advisor: NeighborAngleAdvisor = None,  # Neighbor angle advisor for dynamic center
     advisor_max_dist: float = 1000.0,  # Max distance to neighbor for advisor (meters)
     advisor_smoothing: float = 100.0,  # Smoothing window for neighbor dip (meters)
+    adaptive_smoothing: bool = False,  # Auto-select GR smoothing window based on signal quality
 ) -> List[OptimizedSegment]:
     """
     Optimize entire well from landing point to end using PELT-based segmentation.
@@ -980,12 +1016,31 @@ def optimize_full_well(
     log_md = well_data['log_md'].numpy()
     log_gr = well_data['log_gr'].numpy()
 
+    # Calculate adaptive smoothing window BEFORE any processing
+    smoothing_window_used = 0
+    shit_score = 0.0
+    if adaptive_smoothing:
+        from scipy.signal import savgol_filter
+        shit_score = calc_shit_score(log_gr)  # Calculate on raw log_gr
+        smoothing_window_used = get_adaptive_window(log_gr)
+        if smoothing_window_used >= 3:
+            # Apply smoothing to log_gr BEFORE interpolation
+            log_gr = savgol_filter(log_gr, smoothing_window_used, 2)
+            if verbose:
+                print(f"  Adaptive smoothing: shit_score={shit_score:.3f} -> window={smoothing_window_used}")
+
     # Get typewell (tvd_shift will be applied in optimizer, not here)
+    # Note: apply_smoothing=False if adaptive, we'll apply manually with same window
     type_tvd, type_gr, typelog_meta = prepare_typelog(
         well_data,
         use_pseudo=USE_PSEUDO_TYPELOG,
-        apply_smoothing=True
+        apply_smoothing=not adaptive_smoothing  # Skip if we do adaptive
     )
+
+    # Apply adaptive smoothing to type_gr as well
+    if adaptive_smoothing and smoothing_window_used >= 3:
+        from scipy.signal import savgol_filter
+        type_gr = savgol_filter(type_gr, smoothing_window_used, 2)
 
     # tvd_shift from metadata - honest mode without data leakage
     # TESTED 2026-01-08:
@@ -1242,7 +1297,8 @@ def test_single_well(well_name: str = "Well1221~EGFDL"):
 def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter: list = None, json_dir: str = None,
                    algorithm: str = 'BRUTEFORCE', evo_popsize: int = 100, evo_maxiter: int = 50,
                    mc_samples: int = 4000000, mse_weight: float = 0.1, use_advisor: bool = False,
-                   advisor_max_dist: float = 1000.0, advisor_smoothing: float = 100.0):
+                   advisor_max_dist: float = 1000.0, advisor_smoothing: float = 100.0,
+                   adaptive_smoothing: bool = False):
     """Test on all 100 wells with CSV export after each well."""
     import csv
     from datetime import datetime
@@ -1340,6 +1396,7 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter:
             advisor=advisor,
             advisor_max_dist=advisor_max_dist,
             advisor_smoothing=advisor_smoothing,
+            adaptive_smoothing=adaptive_smoothing,
         )
 
         opt_ms = int((time.time() - t_opt_start) * 1000)
@@ -1505,6 +1562,7 @@ if __name__ == '__main__':
     parser.add_argument('--use-advisor', action='store_true', help='Use neighbor advisor for center angles')
     parser.add_argument('--advisor-max-dist', type=float, default=1000.0, help='Max distance to neighbor for advisor (meters)')
     parser.add_argument('--advisor-smoothing', type=float, default=100.0, help='Smoothing window for neighbor dip angle (meters)')
+    parser.add_argument('--adaptive-smoothing', action='store_true', help='Auto-select GR smoothing window based on signal quality')
     args = parser.parse_args()
 
     # Detect GPU and check memory
@@ -1526,12 +1584,14 @@ if __name__ == '__main__':
         test_all_wells(angle_range=args.angle_range, json_dir=args.json_dir,
                        algorithm=args.algorithm, evo_popsize=args.evo_popsize, evo_maxiter=args.evo_maxiter,
                        mc_samples=args.mc_samples, mse_weight=args.mse_weight, use_advisor=args.use_advisor,
-                       advisor_max_dist=args.advisor_max_dist, advisor_smoothing=args.advisor_smoothing)
+                       advisor_max_dist=args.advisor_max_dist, advisor_smoothing=args.advisor_smoothing,
+                       adaptive_smoothing=args.adaptive_smoothing)
     elif args.wells:
         print("\n" + "="*70)
         test_all_wells(angle_range=args.angle_range, well_filter=args.wells, json_dir=args.json_dir,
                        algorithm=args.algorithm, evo_popsize=args.evo_popsize, evo_maxiter=args.evo_maxiter,
                        mc_samples=args.mc_samples, mse_weight=args.mse_weight, use_advisor=args.use_advisor,
-                       advisor_max_dist=args.advisor_max_dist, advisor_smoothing=args.advisor_smoothing)
+                       advisor_max_dist=args.advisor_max_dist, advisor_smoothing=args.advisor_smoothing,
+                       adaptive_smoothing=args.adaptive_smoothing)
     else:
         test_single_well()

@@ -48,3 +48,87 @@ def get_smoothing_params() -> dict:
         'order': order,
         'enabled': window >= 3
     }
+
+
+def calc_shit_score(gr_values: np.ndarray) -> float:
+    """
+    Calculate GR signal quality score (higher = worse quality = more smoothing needed).
+
+    Components:
+    - repeats: ratio of consecutive identical values
+    - linear: ratio of points on linear segments (2nd derivative ~0)
+    - quant: quantization level (few unique values)
+    - steps: ratio of large jumps
+
+    Returns:
+        Score from 0 (good quality) to 1 (bad quality / needs smoothing)
+    """
+    gr = np.array(gr_values)
+
+    # 1. Repeats ratio
+    diffs = np.diff(gr)
+    repeats_ratio = np.sum(diffs == 0) / len(diffs) if len(diffs) > 0 else 0
+
+    # 2. Linear interpolation (2nd derivative near zero)
+    if len(gr) > 2:
+        d2 = np.diff(gr, n=2)
+        threshold = np.std(d2) * 0.1 if np.std(d2) > 0 else 0.01
+        linear_ratio = np.sum(np.abs(d2) < threshold) / len(d2)
+    else:
+        linear_ratio = 0
+
+    # 3. Quantization - few unique values
+    unique_count = len(np.unique(np.round(gr, 1)))
+    value_range = gr.max() - gr.min()
+    expected_count = max(value_range / 0.1, 1)
+    quant_score = max(0, 1 - unique_count / expected_count)
+
+    # 4. Step jumps
+    if len(diffs) > 0 and np.std(diffs) > 0:
+        big_jumps = np.abs(diffs) > np.std(diffs) * 2
+        step_ratio = np.sum(big_jumps) / len(diffs)
+    else:
+        step_ratio = 0
+
+    return 0.4 * repeats_ratio + 0.3 * linear_ratio + 0.2 * quant_score + 0.1 * step_ratio
+
+
+def get_adaptive_window(gr_values: np.ndarray) -> int:
+    """
+    Get adaptive smoothing window based on GR signal quality.
+
+    Thresholds:
+    - shit_score > 0.4: window=15 (heavily quantized)
+    - shit_score > 0.25: window=11 (moderately quantized)
+    - else: window=5 (good quality)
+
+    Returns:
+        Recommended Savitzky-Golay window size
+    """
+    score = calc_shit_score(gr_values)
+
+    if score > 0.4:
+        return 15
+    elif score > 0.25:
+        return 11
+    else:
+        return 5
+
+
+def apply_gr_smoothing_adaptive(values: np.ndarray, order: int = 2) -> tuple:
+    """
+    Apply adaptive GR smoothing based on signal quality.
+
+    Returns:
+        (smoothed_values, window_used, shit_score)
+    """
+    score = calc_shit_score(values)
+    window = get_adaptive_window(values)
+
+    if window % 2 == 0:
+        window += 1
+    if order >= window:
+        order = window - 1
+
+    smoothed = savgol_filter(values, window, order)
+    return smoothed, window, score
