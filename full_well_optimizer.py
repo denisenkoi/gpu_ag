@@ -276,10 +276,6 @@ def optimize_segment_block_gpu(
     end_idx = segment_indices[-1][1]
     n_points = end_idx - start_idx
 
-    # Debug: log block stats
-    mem_per_chunk_gb = chunk_size * n_points * 4 / 1e9
-    print(f"    Block: {n_seg} segs, grid_sizes={grid_sizes}, n_combos={n_combos:,}, n_points={n_points}, mem/chunk={mem_per_chunk_gb:.2f}GB", flush=True)
-
     zone_tvd = torch.tensor(well_tvd[start_idx:end_idx], device=device, dtype=GPU_DTYPE)
     zone_gr = torch.tensor(well_gr[start_idx:end_idx], device=device, dtype=GPU_DTYPE)
     zone_gr_centered = zone_gr - zone_gr.mean()
@@ -990,6 +986,7 @@ def optimize_full_well(
     advisor_max_dist: float = 1000.0,  # Max distance to neighbor for advisor (meters)
     advisor_smoothing: float = 100.0,  # Smoothing window for neighbor dip (meters)
     adaptive_smoothing: bool = False,  # Auto-select GR smoothing window based on signal quality
+    block_overlap: int = 0,  # Number of segments to overlap between blocks (re-optimize)
 ) -> List[OptimizedSegment]:
     """
     Optimize entire well from landing point to end using PELT-based segmentation.
@@ -1204,10 +1201,30 @@ def optimize_full_well(
                   f"{len(seg_indices)} seg, Pearson={pearson:.3f}, "
                   f"angle_range=±{effective_angle_range:.1f}°")
 
-        # Move to next block
-        boundary_idx += len(block_boundaries)
-        current_md = block_end
-        current_shift = end_shift
+        # Move to next block (with optional overlap)
+        if block_overlap > 0 and len(block_boundaries) > block_overlap:
+            # Overlap: step back N segments, remove them from results to re-optimize
+            advance = len(block_boundaries) - block_overlap
+            boundary_idx += advance
+
+            # Remove last overlap segments from results (will be re-optimized)
+            if len(all_segments) >= block_overlap:
+                for _ in range(block_overlap):
+                    all_segments.pop()
+
+            # Set current position to overlap start
+            if all_segments:
+                current_md = all_segments[-1].end_md
+                current_shift = all_segments[-1].end_shift
+            else:
+                # Fallback if all segments removed
+                current_md = all_boundaries[boundary_idx - 1] if boundary_idx > 0 else zone_start
+                current_shift = initial_shift
+        else:
+            # No overlap - advance by full block
+            boundary_idx += len(block_boundaries)
+            current_md = block_end
+            current_shift = end_shift
 
     return all_segments
 
@@ -1273,7 +1290,7 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter:
                    algorithm: str = 'BRUTEFORCE', evo_popsize: int = 100, evo_maxiter: int = 50,
                    mc_samples: int = 4000000, mse_weight: float = 0.1, use_advisor: bool = False,
                    advisor_max_dist: float = 1000.0, advisor_smoothing: float = 100.0,
-                   adaptive_smoothing: bool = False):
+                   adaptive_smoothing: bool = False, block_overlap: int = 0):
     """Test on all 100 wells with CSV export after each well."""
     import csv
     from datetime import datetime
@@ -1373,6 +1390,7 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter:
             advisor_max_dist=advisor_max_dist,
             advisor_smoothing=advisor_smoothing,
             adaptive_smoothing=adaptive_smoothing,
+            block_overlap=block_overlap,
         )
 
         opt_ms = int((time.time() - t_opt_start) * 1000)
@@ -1539,6 +1557,7 @@ if __name__ == '__main__':
     parser.add_argument('--advisor-max-dist', type=float, default=1000.0, help='Max distance to neighbor for advisor (meters)')
     parser.add_argument('--advisor-smoothing', type=float, default=100.0, help='Smoothing window for neighbor dip angle (meters)')
     parser.add_argument('--adaptive-smoothing', action='store_true', help='Auto-select GR smoothing window based on signal quality')
+    parser.add_argument('--block-overlap', type=int, default=0, help='Segments to overlap between blocks (re-optimize)')
     args = parser.parse_args()
 
     # Detect GPU and check memory
@@ -1561,13 +1580,13 @@ if __name__ == '__main__':
                        algorithm=args.algorithm, evo_popsize=args.evo_popsize, evo_maxiter=args.evo_maxiter,
                        mc_samples=args.mc_samples, mse_weight=args.mse_weight, use_advisor=args.use_advisor,
                        advisor_max_dist=args.advisor_max_dist, advisor_smoothing=args.advisor_smoothing,
-                       adaptive_smoothing=args.adaptive_smoothing)
+                       adaptive_smoothing=args.adaptive_smoothing, block_overlap=args.block_overlap)
     elif args.wells:
         print("\n" + "="*70)
         test_all_wells(angle_range=args.angle_range, well_filter=args.wells, json_dir=args.json_dir,
                        algorithm=args.algorithm, evo_popsize=args.evo_popsize, evo_maxiter=args.evo_maxiter,
                        mc_samples=args.mc_samples, mse_weight=args.mse_weight, use_advisor=args.use_advisor,
                        advisor_max_dist=args.advisor_max_dist, advisor_smoothing=args.advisor_smoothing,
-                       adaptive_smoothing=args.adaptive_smoothing)
+                       adaptive_smoothing=args.adaptive_smoothing, block_overlap=args.block_overlap)
     else:
         test_single_well()
