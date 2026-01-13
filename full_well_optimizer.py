@@ -62,8 +62,8 @@ DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 # NOTE: 5090 degrades badly at chunk_size=500k (55s vs 8s)
 # Conservative settings for stability
 GPU_CONFIGS = {
-    '3090': {'chunk_size': 200000, 'min_free_gb': 15},
-    '5090': {'chunk_size': 300000, 'min_free_gb': 20},
+    '3090': {'chunk_size': 100000, 'min_free_gb': 15},
+    '5090': {'chunk_size': 150000, 'min_free_gb': 20},
     'default': {'chunk_size': 70000, 'min_free_gb': 10},
 }
 
@@ -1325,7 +1325,8 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter:
                    mc_samples: int = 4000000, mse_weight: float = 0.1, use_advisor: bool = False,
                    advisor_max_dist: float = 1000.0, advisor_smoothing: float = 100.0,
                    adaptive_smoothing: bool = False, block_overlap: int = 0, center_mode: str = 'trend',
-                   description: str = None, cli_args: str = None):
+                   description: str = None, cli_args: str = None,
+                   run_id: str = None, timeout: int = 600):
     """Test on all 100 wells with CSV export after each well."""
     import csv
     from datetime import datetime
@@ -1346,11 +1347,15 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter:
         wells_to_test = list(ds.items())
         n_wells = len(wells_to_test)
 
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Use provided run_id or generate new one
+    is_continuation = run_id is not None
+    if not run_id:
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_started = datetime.now().isoformat()
     print(f"Testing full well optimization on {n_wells} wells (angle_range=±{angle_range}°)")
-    print(f"Run ID: {run_id}")
+    print(f"Run ID: {run_id}" + (" (continuation)" if is_continuation else " (new)"))
     print(f"Started: {run_started}")
+    print(f"Lock timeout: {timeout}s")
     print("=" * 70)
     sys.stdout.flush()
 
@@ -1392,146 +1397,165 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter:
 
     errors = []
     baseline_errors = []
+    skipped_wells = 0
     t_start = time.time()
 
     for i, (well_name, well_data) in enumerate(wells_to_test):
+        # Try to lock well (atomic - supports parallel workers)
+        if not db_logger.try_lock_well(well_name, timeout):
+            print(f"{i+1:3d}/{n_wells} {well_name:<20} [SKIP - already done or locked]")
+            skipped_wells += 1
+            continue
+
         well_started = datetime.now().isoformat()
         t_well_start = time.time()
 
-        # === PREP PHASE ===
-        t_prep_start = time.time()
+        try:
+            # === PREP PHASE ===
+            t_prep_start = time.time()
 
-        # Get reference end shift
-        well_md = well_data['well_md'].numpy()
-        log_md = well_data['log_md'].numpy()
-        ref_end_md = min(well_md[-1], log_md[-1])
-        ref_end_shift = interpolate_shift_at_md(well_data, ref_end_md)
+            # Get reference end shift
+            well_md = well_data['well_md'].numpy()
+            log_md = well_data['log_md'].numpy()
+            ref_end_md = min(well_md[-1], log_md[-1])
+            ref_end_shift = interpolate_shift_at_md(well_data, ref_end_md)
 
-        # Baseline (TVT=const from 87° + 200m point)
-        well_tvd = well_data['well_tvd'].numpy()
-        baseline_md = float(well_data.get('landing_end_87_200', well_md[len(well_md)//2]))
-        baseline_idx = min(int(np.searchsorted(well_md, baseline_md)), len(well_md) - 1)
-        tvt_at_baseline = well_tvd[baseline_idx] - interpolate_shift_at_md(well_data, well_md[baseline_idx])
-        baseline_shift = well_tvd[np.searchsorted(well_md, ref_end_md) - 1] - tvt_at_baseline
-        baseline_error = baseline_shift - ref_end_shift
-        baseline_errors.append(baseline_error)
+            # Baseline (TVT=const from 87° + 200m point)
+            well_tvd = well_data['well_tvd'].numpy()
+            baseline_md = float(well_data.get('landing_end_87_200', well_md[len(well_md)//2]))
+            baseline_idx = min(int(np.searchsorted(well_md, baseline_md)), len(well_md) - 1)
+            tvt_at_baseline = well_tvd[baseline_idx] - interpolate_shift_at_md(well_data, well_md[baseline_idx])
+            baseline_shift = well_tvd[np.searchsorted(well_md, ref_end_md) - 1] - tvt_at_baseline
+            baseline_error = baseline_shift - ref_end_shift
+            baseline_errors.append(baseline_error)
 
-        prep_ms = int((time.time() - t_prep_start) * 1000)
+            prep_ms = int((time.time() - t_prep_start) * 1000)
 
-        # === OPTIMIZATION PHASE ===
-        t_opt_start = time.time()
+            # === OPTIMIZATION PHASE ===
+            t_opt_start = time.time()
 
-        segments = optimize_full_well(
-            well_name, well_data,
-            angle_range=angle_range,
-            mse_weight=mse_weight,
-            verbose=False,
-            algorithm=algorithm,
-            evo_popsize=evo_popsize,
-            evo_maxiter=evo_maxiter,
-            mc_samples=mc_samples,
-            chunk_size=chunk_size,
-            advisor=advisor,
-            advisor_max_dist=advisor_max_dist,
-            advisor_smoothing=advisor_smoothing,
-            adaptive_smoothing=adaptive_smoothing,
-            block_overlap=block_overlap,
-            center_mode=center_mode,
-        )
+            segments = optimize_full_well(
+                well_name, well_data,
+                angle_range=angle_range,
+                mse_weight=mse_weight,
+                verbose=False,
+                algorithm=algorithm,
+                evo_popsize=evo_popsize,
+                evo_maxiter=evo_maxiter,
+                mc_samples=mc_samples,
+                chunk_size=chunk_size,
+                advisor=advisor,
+                advisor_max_dist=advisor_max_dist,
+                advisor_smoothing=advisor_smoothing,
+                adaptive_smoothing=adaptive_smoothing,
+                block_overlap=block_overlap,
+                center_mode=center_mode,
+            )
 
-        opt_ms = int((time.time() - t_opt_start) * 1000)
+            opt_ms = int((time.time() - t_opt_start) * 1000)
 
-        if not segments:
-            raise RuntimeError(f"No segments returned for {well_name}")
+            if not segments:
+                raise RuntimeError(f"No segments returned for {well_name}")
 
-        pred_end_shift = segments[-1].end_shift
-        opt_error = pred_end_shift - ref_end_shift
-        errors.append(opt_error)
+            pred_end_shift = segments[-1].end_shift
+            opt_error = pred_end_shift - ref_end_shift
+            errors.append(opt_error)
 
-        well_finished = datetime.now().isoformat()
-        total_ms = int((time.time() - t_well_start) * 1000)
+            well_finished = datetime.now().isoformat()
+            total_ms = int((time.time() - t_well_start) * 1000)
 
-        # === WRITE TO CSV IMMEDIATELY ===
-        csv_rows = []
+            # === WRITE TO CSV IMMEDIATELY ===
+            csv_rows = []
 
-        # Segment rows
-        for seg_idx, seg in enumerate(segments):
-            seg_error = seg.end_shift - interpolate_shift_at_md(well_data, seg.end_md)
+            # Segment rows
+            for seg_idx, seg in enumerate(segments):
+                seg_error = seg.end_shift - interpolate_shift_at_md(well_data, seg.end_md)
+                csv_rows.append({
+                    'run_id': run_id,
+                    'well_name': well_name,
+                    'row_type': 'segment',
+                    'seg_idx': seg_idx,
+                    'md_start': f"{seg.start_md:.1f}",
+                    'md_end': f"{seg.end_md:.1f}",
+                    'end_shift': f"{seg.end_shift:.2f}",
+                    'end_error': f"{seg_error:.2f}",
+                    'angle_deg': f"{seg.angle_deg:.3f}",
+                    'pearson': f"{seg.pearson:.3f}",
+                    'baseline_error': '',
+                    'opt_error': '',
+                    'n_segments': '',
+                    'prep_ms': '',
+                    'opt_ms': '',
+                    'total_ms': '',
+                    'started_at': '',
+                    'finished_at': '',
+                })
+
+            # Well summary row
             csv_rows.append({
                 'run_id': run_id,
                 'well_name': well_name,
-                'row_type': 'segment',
-                'seg_idx': seg_idx,
-                'md_start': f"{seg.start_md:.1f}",
-                'md_end': f"{seg.end_md:.1f}",
-                'end_shift': f"{seg.end_shift:.2f}",
-                'end_error': f"{seg_error:.2f}",
-                'angle_deg': f"{seg.angle_deg:.3f}",
-                'pearson': f"{seg.pearson:.3f}",
-                'baseline_error': '',
-                'opt_error': '',
-                'n_segments': '',
-                'prep_ms': '',
-                'opt_ms': '',
-                'total_ms': '',
-                'started_at': '',
-                'finished_at': '',
+                'row_type': 'well',
+                'seg_idx': '',
+                'md_start': f"{segments[0].start_md:.1f}",
+                'md_end': f"{segments[-1].end_md:.1f}",
+                'end_shift': f"{pred_end_shift:.2f}",
+                'end_error': f"{opt_error:.2f}",
+                'angle_deg': f"{np.mean([s.angle_deg for s in segments]):.3f}",
+                'pearson': f"{np.mean([s.pearson for s in segments]):.3f}",
+                'baseline_error': f"{baseline_error:.2f}",
+                'opt_error': f"{opt_error:.2f}",
+                'n_segments': len(segments),
+                'prep_ms': prep_ms,
+                'opt_ms': opt_ms,
+                'total_ms': total_ms,
+                'started_at': well_started,
+                'finished_at': well_finished,
             })
 
-        # Well summary row
-        csv_rows.append({
-            'run_id': run_id,
-            'well_name': well_name,
-            'row_type': 'well',
-            'seg_idx': '',
-            'md_start': f"{segments[0].start_md:.1f}",
-            'md_end': f"{segments[-1].end_md:.1f}",
-            'end_shift': f"{pred_end_shift:.2f}",
-            'end_error': f"{opt_error:.2f}",
-            'angle_deg': f"{np.mean([s.angle_deg for s in segments]):.3f}",
-            'pearson': f"{np.mean([s.pearson for s in segments]):.3f}",
-            'baseline_error': f"{baseline_error:.2f}",
-            'opt_error': f"{opt_error:.2f}",
-            'n_segments': len(segments),
-            'prep_ms': prep_ms,
-            'opt_ms': opt_ms,
-            'total_ms': total_ms,
-            'started_at': well_started,
-            'finished_at': well_finished,
-        })
+            # Append to CSV and flush
+            with open(csv_path, 'a', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=csv_header)
+                writer.writerows(csv_rows)
 
-        # Append to CSV and flush
-        with open(csv_path, 'a', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=csv_header)
-            writer.writerows(csv_rows)
-
-        # Save JSON interpretation if requested
-        if json_dir:
-            json_data = {
-                "well_name": well_name,
-                "interpretation": {
-                    "segments": [
-                        {
-                            "startMd": float(seg.start_md),
-                            "endMd": float(seg.end_md),
-                            "startShift": float(seg.start_shift),
-                            "endShift": float(seg.end_shift)
-                        }
-                        for seg in segments
-                    ]
+            # Save JSON interpretation if requested
+            if json_dir:
+                json_data = {
+                    "well_name": well_name,
+                    "interpretation": {
+                        "segments": [
+                            {
+                                "startMd": float(seg.start_md),
+                                "endMd": float(seg.end_md),
+                                "startShift": float(seg.start_shift),
+                                "endShift": float(seg.end_shift)
+                            }
+                            for seg in segments
+                        ]
+                    }
                 }
-            }
-            json_path = os.path.join(json_dir, f"{well_name}.json")
-            with open(json_path, 'w') as f:
-                json.dump(json_data, f, indent=2)
+                json_path = os.path.join(json_dir, f"{well_name}.json")
+                with open(json_path, 'w') as f:
+                    json.dump(json_data, f, indent=2)
 
-        # Log well result to database (segments already logged via log_block_segments in optimize_full_well)
-        db_logger.log_well_result(well_name, baseline_error, opt_error, len(segments), opt_ms)
+            # Calculate aggregated metrics for well
+            avg_pearson = float(np.mean([s.pearson for s in segments]))
 
-        # Progress output
-        status = "✓" if abs(opt_error) < abs(baseline_error) else "✗"
-        print(f"{i+1:3d}/100 {well_name:<20} base={baseline_error:+7.2f}m opt={opt_error:+7.2f}m {status} prep={prep_ms}ms opt={opt_ms}ms")
-        sys.stdout.flush()
+            # Mark well as completed in database
+            db_logger.complete_well(well_name, baseline_error, opt_error, len(segments), opt_ms,
+                                   pearson=avg_pearson)
+
+            # Progress output
+            status = "✓" if abs(opt_error) < abs(baseline_error) else "✗"
+            print(f"{i+1:3d}/{n_wells} {well_name:<20} base={baseline_error:+7.2f}m opt={opt_error:+7.2f}m {status} prep={prep_ms}ms opt={opt_ms}ms")
+            sys.stdout.flush()
+
+        except Exception as e:
+            # Mark well as failed
+            db_logger.fail_well(well_name, str(e))
+            print(f"{i+1:3d}/{n_wells} {well_name:<20} [FAILED: {e}]")
+            sys.stdout.flush()
+            raise  # Re-raise to stop processing (OOM etc should stop)
 
     t_elapsed = time.time() - t_start
     run_finished = datetime.now().isoformat()
@@ -1569,22 +1593,39 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter:
         writer = csv.DictWriter(f, fieldnames=csv_header)
         writer.writerow(summary_row)
 
-    # Finish DB logging
-    db_logger.finish_run(rmse_baseline, rmse_opt, int(improved), t_elapsed)
+    # Finish DB logging - recalculate stats from all wells in DB
+    db_stats = db_logger.recalculate_run_stats()
     db_logger.close()
 
+    processed_wells = len(errors)
     print("-" * 70)
-    print(f"Results (angle_range=±{angle_range}°):")
-    print(f"  Baseline RMSE: {rmse_baseline:.2f}m")
-    print(f"  Optimized RMSE: {rmse_opt:.2f}m")
-    print(f"  Improvement: {rmse_baseline - rmse_opt:.2f}m ({100*(rmse_baseline-rmse_opt)/rmse_baseline:.1f}%)")
-    print(f"  Wells improved: {improved}/100")
-    print(f"  Time: {t_elapsed:.1f}s ({t_elapsed/100:.2f}s/well)")
-    print(f"  CSV: {csv_path}")
+    print(f"Session results (angle_range=±{angle_range}°):")
+    if processed_wells > 0:
+        print(f"  Baseline RMSE: {rmse_baseline:.2f}m")
+        print(f"  Optimized RMSE: {rmse_opt:.2f}m")
+        print(f"  Improvement: {rmse_baseline - rmse_opt:.2f}m ({100*(rmse_baseline-rmse_opt)/rmse_baseline:.1f}%)")
+        print(f"  Wells improved: {improved}/{processed_wells}")
+        print(f"  Time: {t_elapsed:.1f}s ({t_elapsed/processed_wells:.2f}s/well)")
+    if skipped_wells > 0:
+        print(f"  Wells skipped: {skipped_wells} (already done or locked)")
+
+    # Show full run stats from DB if this was a continuation
+    if db_stats and (skipped_wells > 0 or db_stats.get('n_wells', 0) > processed_wells):
+        print(f"\nFull run stats (from DB):")
+        print(f"  Baseline RMSE: {db_stats['baseline_rmse']:.2f}m")
+        print(f"  Optimized RMSE: {db_stats['optimized_rmse']:.2f}m")
+        db_impr = db_stats['baseline_rmse'] - db_stats['optimized_rmse']
+        print(f"  Improvement: {db_impr:.2f}m ({100*db_impr/db_stats['baseline_rmse']:.1f}%)")
+        print(f"  Wells improved: {db_stats['wells_improved']}/{db_stats['n_wells']}")
+
+    print(f"\n  CSV: {csv_path}")
     print(f"  Finished: {run_finished}")
     sys.stdout.flush()
 
-    return rmse_opt, improved
+    # Return DB stats if available, otherwise session stats
+    final_rmse = db_stats.get('optimized_rmse', rmse_opt) if db_stats else rmse_opt
+    final_improved = db_stats.get('wells_improved', improved) if db_stats else improved
+    return final_rmse, final_improved
 
 
 if __name__ == '__main__':
@@ -1615,6 +1656,10 @@ if __name__ == '__main__':
                         help='Center angle mode: trend (global), local (block trajectory), advisor (neighbors)')
     parser.add_argument('--description', '-d', type=str, required=False,
                         help='Run description (REQUIRED for --all or --wells). Explain purpose of this run.')
+    parser.add_argument('--run-id', type=str, default=None,
+                        help='Continue existing run (uses same run_id, skips completed wells)')
+    parser.add_argument('--timeout', type=int, default=600,
+                        help='Well lock timeout in seconds (default: 600 = 10 min)')
     args = parser.parse_args()
 
     # Require description for batch runs
@@ -1646,7 +1691,8 @@ if __name__ == '__main__':
                        advisor_max_dist=args.advisor_max_dist, advisor_smoothing=args.advisor_smoothing,
                        adaptive_smoothing=args.adaptive_smoothing, block_overlap=args.block_overlap,
                        center_mode=args.center_mode,
-                       description=args.description, cli_args=cli_args)
+                       description=args.description, cli_args=cli_args,
+                       run_id=args.run_id, timeout=args.timeout)
     elif args.wells:
         print("\n" + "="*70)
         test_all_wells(angle_range=args.angle_range, well_filter=args.wells, json_dir=args.json_dir,
@@ -1655,6 +1701,7 @@ if __name__ == '__main__':
                        advisor_max_dist=args.advisor_max_dist, advisor_smoothing=args.advisor_smoothing,
                        adaptive_smoothing=args.adaptive_smoothing, block_overlap=args.block_overlap,
                        center_mode=args.center_mode,
-                       description=args.description, cli_args=cli_args)
+                       description=args.description, cli_args=cli_args,
+                       run_id=args.run_id, timeout=args.timeout)
     else:
         test_single_well()

@@ -233,6 +233,91 @@ class RunLogger:
         except Exception as e:
             print(f"DB error on finalize_well_segments: {e}")
 
+    def try_lock_well(self, well_name: str, timeout_sec: int = 600) -> bool:
+        """Try to lock a well for processing (atomic).
+
+        Returns True if lock acquired, False if well is done or locked by another.
+        """
+        if not self.conn:
+            return True  # No DB = always proceed
+
+        try:
+            with self.conn.cursor() as cur:
+                # Atomic upsert: insert if not exists, update if stale or not done
+                cur.execute("""
+                    INSERT INTO well_results (run_id, well_name, status, started_at, locked_until)
+                    VALUES (%s, %s, 'processing', NOW(), NOW() + interval '%s seconds')
+                    ON CONFLICT (run_id, well_name) DO UPDATE SET
+                        status = 'processing',
+                        started_at = NOW(),
+                        locked_until = NOW() + interval '%s seconds'
+                    WHERE well_results.status != 'done'
+                      AND (well_results.status != 'processing' OR well_results.locked_until < NOW())
+                    RETURNING well_name
+                """, (self.run_id, well_name, timeout_sec, timeout_sec))
+                result = cur.fetchone()
+            self.conn.commit()
+            return result is not None
+        except Exception as e:
+            print(f"DB error on try_lock_well: {e}")
+            return True  # On error, proceed anyway
+
+    def complete_well(self, well_name: str, baseline_error: float, opt_error: float,
+                      n_segments: int, opt_ms: int, rmse: float = None,
+                      pearson: float = None, mse: float = None, score: float = None):
+        """Mark well as completed with all metrics."""
+        if not self.conn:
+            return
+
+        try:
+            improved = bool(abs(float(opt_error)) < abs(float(baseline_error)))
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE well_results SET
+                        status = 'done',
+                        finished_at = NOW(),
+                        baseline_error = %s,
+                        opt_error = %s,
+                        n_segments = %s,
+                        opt_ms = %s,
+                        improved = %s,
+                        rmse = %s,
+                        pearson = %s,
+                        mse = %s,
+                        score = %s
+                    WHERE run_id = %s AND well_name = %s
+                """, (
+                    float(baseline_error), float(opt_error), int(n_segments), int(opt_ms),
+                    improved,
+                    float(rmse) if rmse is not None else None,
+                    float(pearson) if pearson is not None else None,
+                    float(mse) if mse is not None else None,
+                    float(score) if score is not None else None,
+                    self.run_id, well_name
+                ))
+            self.conn.commit()
+        except Exception as e:
+            print(f"DB error on complete_well: {e}")
+
+    def fail_well(self, well_name: str, error_msg: str = None):
+        """Mark well as failed."""
+        if not self.conn:
+            return
+
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE well_results SET
+                        status = 'failed',
+                        finished_at = NOW()
+                    WHERE run_id = %s AND well_name = %s
+                """, (self.run_id, well_name))
+            self.conn.commit()
+            if error_msg:
+                print(f"Well {well_name} failed: {error_msg}")
+        except Exception as e:
+            print(f"DB error on fail_well: {e}")
+
     def log_interpretation(self, well_name: str, segments: List[Any]):
         """Log all segments for a well (legacy method, marks all as active)."""
         if not self.conn or not segments:
@@ -293,6 +378,63 @@ class RunLogger:
             self.conn.commit()
         except Exception as e:
             print(f"DB error on finish_run: {e}")
+
+    def recalculate_run_stats(self) -> dict:
+        """Recalculate run stats from well_results table.
+
+        Returns dict with calculated stats.
+        """
+        if not self.conn:
+            return {}
+
+        try:
+            import numpy as np
+            with self.conn.cursor() as cur:
+                # Get all completed wells
+                cur.execute("""
+                    SELECT baseline_error, opt_error, opt_ms
+                    FROM well_results
+                    WHERE run_id = %s AND status = 'done'
+                      AND baseline_error IS NOT NULL AND opt_error IS NOT NULL
+                """, (self.run_id,))
+                rows = cur.fetchall()
+
+                if not rows:
+                    return {}
+
+                baseline = np.array([r[0] for r in rows])
+                optimized = np.array([r[1] for r in rows])
+                times_ms = [r[2] for r in rows if r[2] is not None]
+
+                rmse_base = float(np.sqrt(np.mean(baseline**2)))
+                rmse_opt = float(np.sqrt(np.mean(optimized**2)))
+                improved = int(np.sum(np.abs(optimized) < np.abs(baseline)))
+                n_wells = len(rows)
+                total_time = sum(times_ms) / 1000.0 if times_ms else 0.0
+
+                # Update runs table
+                cur.execute("""
+                    UPDATE runs SET
+                        baseline_rmse = %s,
+                        optimized_rmse = %s,
+                        wells_improved = %s,
+                        n_wells = %s,
+                        total_time_sec = %s,
+                        finished_at = NOW()
+                    WHERE run_id = %s
+                """, (rmse_base, rmse_opt, improved, n_wells, total_time, self.run_id))
+
+            self.conn.commit()
+            return {
+                'baseline_rmse': rmse_base,
+                'optimized_rmse': rmse_opt,
+                'wells_improved': improved,
+                'n_wells': n_wells,
+                'total_time_sec': total_time,
+            }
+        except Exception as e:
+            print(f"DB error on recalculate_run_stats: {e}")
+            return {}
 
     def close(self):
         """Close database connection."""
