@@ -35,6 +35,7 @@ from numpy_funcs.interpretation import interpolate_shift_at_md
 from cpu_baseline.preprocessing import prepare_typelog
 from neighbor_angle_advisor import NeighborAngleAdvisor
 import pandas as pd
+from db_logger import init_logger, get_logger
 
 # Load SC baseline from CSV (once at module load)
 _SC_BASELINE_PATH = Path(__file__).parent / 'results' / 'self_correlation_baseline.csv'
@@ -987,6 +988,7 @@ def optimize_full_well(
     advisor_smoothing: float = 100.0,  # Smoothing window for neighbor dip (meters)
     adaptive_smoothing: bool = False,  # Auto-select GR smoothing window based on signal quality
     block_overlap: int = 0,  # Number of segments to overlap between blocks (re-optimize)
+    center_mode: str = 'trend',  # Center angle mode: 'trend' (global), 'local' (block trajectory), 'advisor' (neighbors)
 ) -> List[OptimizedSegment]:
     """
     Optimize entire well from landing point to end using PELT-based segmentation.
@@ -1111,9 +1113,21 @@ def optimize_full_well(
             current_md = block_end
             continue
 
-        # Determine center angle for this block
-        if advisor is not None:
-            # Use advisor recommendation as center (based on neighbor interpretations)
+        # Determine center angle for this block based on center_mode
+        if center_mode == 'local':
+            # Local: use trajectory angle of current block
+            block_start_idx = seg_indices[0][0]
+            block_end_idx = seg_indices[-1][1] - 1
+            block_delta_tvd = well_tvd[block_end_idx] - well_tvd[block_start_idx]
+            block_delta_md = well_md[block_end_idx] - well_md[block_start_idx]
+            if block_delta_md > 5:
+                traj_angle = np.degrees(np.arctan(block_delta_tvd / block_delta_md))
+            else:
+                traj_angle = trend_angle  # Fallback for very short blocks
+            if verbose:
+                print(f"    Local angle: MD {current_md:.0f}-{block_end:.0f}, angle={traj_angle:+.2f}°")
+        elif center_mode == 'advisor' and advisor is not None:
+            # Advisor: use neighbor interpretations
             block_center_md = (current_md + block_end) / 2
             advisor_dip = advisor.get_recommended_dip(
                 well_name, block_center_md,
@@ -1126,9 +1140,9 @@ def optimize_full_well(
                 if verbose:
                     print(f"    Advisor: center_md={block_center_md:.0f}, rec_dip={advisor_dip:+.2f}°")
             else:
-                traj_angle = trend_angle  # Fallback if no neighbors within max_distance
+                traj_angle = trend_angle  # Fallback if no neighbors
         else:
-            # Use trend angle (from landing to zone_start) as before
+            # Trend (default): global angle from zone_start to well_end
             traj_angle = trend_angle
 
         # Get SC baseline for this well
@@ -1196,6 +1210,21 @@ def optimize_full_well(
 
             seg_start_shift = seg_end_shift
 
+        # Log block to database
+        logger = get_logger()
+        if logger:
+            n_angles_per_seg = int(2 * effective_angle_range / angle_step) + 1
+            n_combos = n_angles_per_seg ** len(seg_indices)
+            block_opt_ms = 0  # TODO: measure actual time
+            logger.log_block(well_name, block_num - 1, n_angles_per_seg, n_combos,
+                           block_opt_ms, 0.0, pearson)  # score=0 for now
+
+            # Log segments with block_idx
+            # Determine global seg_start_idx
+            seg_start_idx = len(all_segments) - len(seg_indices)
+            block_segments = all_segments[seg_start_idx:]
+            logger.log_block_segments(well_name, block_num - 1, block_segments, seg_start_idx)
+
         if verbose:
             print(f"  Block {block_num}: MD {current_md:.1f}-{block_end:.1f}m, "
                   f"{len(seg_indices)} seg, Pearson={pearson:.3f}, "
@@ -1225,6 +1254,11 @@ def optimize_full_well(
             boundary_idx += len(block_boundaries)
             current_md = block_end
             current_shift = end_shift
+
+    # Mark all final segments as active
+    logger = get_logger()
+    if logger:
+        logger.finalize_well_segments(well_name)
 
     return all_segments
 
@@ -1290,7 +1324,8 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter:
                    algorithm: str = 'BRUTEFORCE', evo_popsize: int = 100, evo_maxiter: int = 50,
                    mc_samples: int = 4000000, mse_weight: float = 0.1, use_advisor: bool = False,
                    advisor_max_dist: float = 1000.0, advisor_smoothing: float = 100.0,
-                   adaptive_smoothing: bool = False, block_overlap: int = 0):
+                   adaptive_smoothing: bool = False, block_overlap: int = 0, center_mode: str = 'trend',
+                   description: str = None, cli_args: str = None):
     """Test on all 100 wells with CSV export after each well."""
     import csv
     from datetime import datetime
@@ -1318,6 +1353,16 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter:
     print(f"Started: {run_started}")
     print("=" * 70)
     sys.stdout.flush()
+
+    # Initialize DB logger
+    db_logger = init_logger(run_id)
+    db_logger.set_params(
+        angle_range=angle_range, mse_weight=mse_weight,
+        block_overlap=block_overlap, center_mode=center_mode,
+        chunk_size=chunk_size, algorithm=algorithm,
+        description=description, cli_args=cli_args
+    )
+    db_logger.start_run(n_wells)
 
     # CSV setup - new file for this run
     csv_path = Path(__file__).parent / 'results' / f'full_well_{run_id}.csv'
@@ -1391,6 +1436,7 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter:
             advisor_smoothing=advisor_smoothing,
             adaptive_smoothing=adaptive_smoothing,
             block_overlap=block_overlap,
+            center_mode=center_mode,
         )
 
         opt_ms = int((time.time() - t_opt_start) * 1000)
@@ -1479,6 +1525,9 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter:
             with open(json_path, 'w') as f:
                 json.dump(json_data, f, indent=2)
 
+        # Log well result to database (segments already logged via log_block_segments in optimize_full_well)
+        db_logger.log_well_result(well_name, baseline_error, opt_error, len(segments), opt_ms)
+
         # Progress output
         status = "✓" if abs(opt_error) < abs(baseline_error) else "✗"
         print(f"{i+1:3d}/100 {well_name:<20} base={baseline_error:+7.2f}m opt={opt_error:+7.2f}m {status} prep={prep_ms}ms opt={opt_ms}ms")
@@ -1520,6 +1569,10 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter:
         writer = csv.DictWriter(f, fieldnames=csv_header)
         writer.writerow(summary_row)
 
+    # Finish DB logging
+    db_logger.finish_run(rmse_baseline, rmse_opt, int(improved), t_elapsed)
+    db_logger.close()
+
     print("-" * 70)
     print(f"Results (angle_range=±{angle_range}°):")
     print(f"  Baseline RMSE: {rmse_baseline:.2f}m")
@@ -1558,7 +1611,18 @@ if __name__ == '__main__':
     parser.add_argument('--advisor-smoothing', type=float, default=100.0, help='Smoothing window for neighbor dip angle (meters)')
     parser.add_argument('--adaptive-smoothing', action='store_true', help='Auto-select GR smoothing window based on signal quality')
     parser.add_argument('--block-overlap', type=int, default=0, help='Segments to overlap between blocks (re-optimize)')
+    parser.add_argument('--center-mode', type=str, default='trend', choices=['trend', 'local', 'advisor'],
+                        help='Center angle mode: trend (global), local (block trajectory), advisor (neighbors)')
+    parser.add_argument('--description', '-d', type=str, required=False,
+                        help='Run description (REQUIRED for --all or --wells). Explain purpose of this run.')
     args = parser.parse_args()
+
+    # Require description for batch runs
+    if (args.all or args.wells) and not args.description:
+        parser.error("--description is required for batch runs (--all or --wells)")
+
+    # Capture full CLI args for logging
+    cli_args = ' '.join(sys.argv[1:])
 
     # Detect GPU and check memory
     gpu_model = detect_gpu_model()
@@ -1580,13 +1644,17 @@ if __name__ == '__main__':
                        algorithm=args.algorithm, evo_popsize=args.evo_popsize, evo_maxiter=args.evo_maxiter,
                        mc_samples=args.mc_samples, mse_weight=args.mse_weight, use_advisor=args.use_advisor,
                        advisor_max_dist=args.advisor_max_dist, advisor_smoothing=args.advisor_smoothing,
-                       adaptive_smoothing=args.adaptive_smoothing, block_overlap=args.block_overlap)
+                       adaptive_smoothing=args.adaptive_smoothing, block_overlap=args.block_overlap,
+                       center_mode=args.center_mode,
+                       description=args.description, cli_args=cli_args)
     elif args.wells:
         print("\n" + "="*70)
         test_all_wells(angle_range=args.angle_range, well_filter=args.wells, json_dir=args.json_dir,
                        algorithm=args.algorithm, evo_popsize=args.evo_popsize, evo_maxiter=args.evo_maxiter,
                        mc_samples=args.mc_samples, mse_weight=args.mse_weight, use_advisor=args.use_advisor,
                        advisor_max_dist=args.advisor_max_dist, advisor_smoothing=args.advisor_smoothing,
-                       adaptive_smoothing=args.adaptive_smoothing, block_overlap=args.block_overlap)
+                       adaptive_smoothing=args.adaptive_smoothing, block_overlap=args.block_overlap,
+                       center_mode=args.center_mode,
+                       description=args.description, cli_args=cli_args)
     else:
         test_single_well()
