@@ -590,10 +590,9 @@ def optimize_segment_block_montecarlo(
             best_angles_result = chunk_angles[chunk_best_idx].cpu().numpy()
             best_end_shift_result = end_shifts[chunk_best_idx, -1].item()
 
-        # Cleanup
+        # Cleanup tensors (cache cleared per-well, not per-chunk)
         del chunk_angles, shift_deltas, cumsum, end_shifts, start_shifts_tensor
         del synthetic, synthetic_centered, numer, denom, pearsons, mse, mse_norm, scores
-        torch.cuda.empty_cache()
 
     return best_pearson, best_end_shift_result, best_angles_result, start_shift
 
@@ -1369,6 +1368,11 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter:
     )
     db_logger.start_run(n_wells)
 
+    # Create pending entries for all wells (for status.py to show total)
+    if not is_continuation:
+        well_names = [w[0] for w in wells_to_test]
+        db_logger.create_pending_wells(well_names)
+
     # CSV setup - new file for this run
     csv_path = Path(__file__).parent / 'results' / f'full_well_{run_id}.csv'
     csv_path.parent.mkdir(exist_ok=True)
@@ -1549,6 +1553,9 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter:
             status = "✓" if abs(opt_error) < abs(baseline_error) else "✗"
             print(f"{i+1:3d}/{n_wells} {well_name:<20} base={baseline_error:+7.2f}m opt={opt_error:+7.2f}m {status} prep={prep_ms}ms opt={opt_ms}ms")
             sys.stdout.flush()
+
+            # Clear GPU cache after each well
+            torch.cuda.empty_cache()
 
         except Exception as e:
             # Mark well as failed

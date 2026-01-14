@@ -120,6 +120,27 @@ class RunLogger:
         except Exception as e:
             print(f"DB error on start_run: {e}")
 
+    def create_pending_wells(self, well_names: List[str]):
+        """Create pending entries for all wells at start of run.
+
+        This allows status.py to show total wells count immediately.
+        """
+        if not self.conn or not well_names:
+            return
+
+        try:
+            with self.conn.cursor() as cur:
+                for well_name in well_names:
+                    cur.execute("""
+                        INSERT INTO well_results (run_id, well_name, status)
+                        VALUES (%s, %s, 'pending')
+                        ON CONFLICT (run_id, well_name) DO NOTHING
+                    """, (self.run_id, well_name))
+            self.conn.commit()
+            print(f"Created {len(well_names)} pending wells")
+        except Exception as e:
+            print(f"DB error on create_pending_wells: {e}")
+
     def log_well_result(self, well_name: str, baseline_error: float,
                         opt_error: float, n_segments: int, opt_ms: int):
         """Log single well result."""
