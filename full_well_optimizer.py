@@ -36,6 +36,7 @@ from cpu_baseline.preprocessing import prepare_typelog
 from neighbor_angle_advisor import NeighborAngleAdvisor
 import pandas as pd
 from db_logger import init_logger, get_logger
+from optimizers import get_optimizer
 
 # Load SC baseline from CSV (once at module load)
 _SC_BASELINE_PATH = Path(__file__).parent / 'results' / 'self_correlation_baseline.csv'
@@ -1173,6 +1174,27 @@ def optimize_full_well(
                 chunk_size=chunk_size,
                 tvd_shift=tvd_shift,
             )
+        elif algorithm.upper().startswith('SCIPY_DE'):
+            # Scipy Differential Evolution with GPU batch
+            opt = get_optimizer(
+                algorithm.upper(),
+                device=DEVICE,
+                angle_range=effective_angle_range,
+                mse_weight=mse_weight,
+                popsize=evo_popsize,
+                maxiter=evo_maxiter,
+            )
+            opt_result = opt.optimize(
+                seg_indices, current_shift, traj_angle,
+                well_md, well_tvd, well_gr,
+                type_tvd, type_gr,
+                return_result=True,  # Get full OptimizeResult
+            )
+            pearson = opt_result.pearson
+            end_shift = opt_result.end_shift
+            best_angles = opt_result.angles
+            # Store result for logging
+            _last_opt_result = opt_result
         else:
             # Brute-force (default)
             pearson, end_shift, best_angles, _ = optimize_segment_block_gpu(
@@ -1214,9 +1236,26 @@ def optimize_full_well(
         if logger:
             n_angles_per_seg = int(2 * effective_angle_range / angle_step) + 1
             n_combos = n_angles_per_seg ** len(seg_indices)
-            block_opt_ms = 0  # TODO: measure actual time
-            logger.log_block(well_name, block_num - 1, n_angles_per_seg, n_combos,
-                           block_opt_ms, 0.0, pearson)  # score=0 for now
+
+            # Use OptimizeResult if available (SCIPY_DE), otherwise legacy values
+            if '_last_opt_result' in dir() and _last_opt_result is not None:
+                logger.log_block(
+                    well_name, block_num - 1, n_angles_per_seg, n_combos,
+                    opt_ms=_last_opt_result.opt_ms,
+                    best_score=_last_opt_result.score,
+                    best_pearson=_last_opt_result.pearson,
+                    best_mse=_last_opt_result.mse,
+                    best_loss=_last_opt_result.loss,
+                    n_segments=_last_opt_result.n_segments,
+                    ref_angle=_last_opt_result.ref_angle,
+                    angles=_last_opt_result.angles.tolist(),
+                    angle_diffs=_last_opt_result.angle_diffs.tolist(),
+                )
+                _last_opt_result = None  # Reset after logging
+            else:
+                # Legacy logging for BruteForce and others
+                logger.log_block(well_name, block_num - 1, n_angles_per_seg, n_combos,
+                               opt_ms=0, best_score=0.0, best_pearson=pearson)
 
             # Log segments with block_idx
             # Determine global seg_start_idx
@@ -1648,7 +1687,7 @@ if __name__ == '__main__':
     parser.add_argument('--skip-memory-check', action='store_true', help='Skip GPU memory check')
     parser.add_argument('--json-dir', type=str, default=None, help='Directory to save JSON interpretations')
     parser.add_argument('--algorithm', type=str, default='BRUTEFORCE',
-                        choices=['BRUTEFORCE', 'CMAES', 'SNES', 'MONTECARLO'],
+                        choices=['BRUTEFORCE', 'CMAES', 'SNES', 'MONTECARLO', 'SCIPY_DE', 'SCIPY_DE_AGGRESSIVE'],
                         help='Optimization algorithm (default: BRUTEFORCE)')
     parser.add_argument('--evo-popsize', type=int, default=100, help='Population size for evolutionary algorithms')
     parser.add_argument('--evo-maxiter', type=int, default=50, help='Max iterations for evolutionary algorithms')

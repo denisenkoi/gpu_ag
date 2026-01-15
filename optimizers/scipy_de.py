@@ -10,12 +10,13 @@ This should be faster than EvoTorch CMA-ES/SNES because:
 2. Batch evaluation minimizes CPU<->GPU transfers
 """
 
+import time
 import torch
 import numpy as np
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Union
 from scipy.optimize import differential_evolution
 
-from .base import BaseBlockOptimizer
+from .base import BaseBlockOptimizer, OptimizeResult
 from . import register_optimizer, prepare_block_data, compute_loss_batch, GPU_DTYPE
 
 
@@ -63,12 +64,18 @@ class ScipyDEOptimizer(BaseBlockOptimizer):
         well_gr: np.ndarray,
         type_tvd: np.ndarray,
         type_gr: np.ndarray,
+        return_result: bool = False,
         **kwargs
-    ) -> Tuple[float, float, np.ndarray, float]:
+    ) -> Union[Tuple[float, float, np.ndarray, float], OptimizeResult]:
         """
         Optimize using scipy Differential Evolution with GPU batch evaluation.
+
+        Args:
+            return_result: If True, return OptimizeResult with full metrics.
+                          If False (default), return legacy tuple for compatibility.
         """
         n_seg = len(segment_indices)
+        start_time = time.perf_counter()
 
         # Prepare block data (transfers to GPU once, stays there!)
         block_data = prepare_block_data(
@@ -85,26 +92,39 @@ class ScipyDEOptimizer(BaseBlockOptimizer):
             for _ in range(n_seg)
         ]
 
-        # Track best result
-        best_result = {'loss': float('inf'), 'pearson': 0.0, 'angles': None}
+        # Track best result with all metrics
+        best_result = {
+            'loss': float('inf'),
+            'pearson': 0.0,
+            'mse': 0.0,
+            'score': 0.0,
+            'angles': None
+        }
+        n_evaluations = [0]  # Use list for mutation in closure
 
         def fitness_vectorized(angles_population: np.ndarray) -> np.ndarray:
             """
             Vectorized fitness function for scipy DE.
 
             Args:
-                angles_population: (popsize, n_seg) array of angle candidates
+                angles_population: (n_seg, popsize) array - scipy passes transposed!
 
             Returns:
                 (popsize,) array of fitness values (lower is better)
             """
+            # scipy passes (n_seg, popsize), we need (popsize, n_seg)
+            if angles_population.ndim == 2 and angles_population.shape[0] == n_seg:
+                angles_population = angles_population.T
+
+            n_evaluations[0] += len(angles_population)
+
             # Transfer angles to GPU (small data, fast)
             angles_tensor = torch.tensor(
                 angles_population, device=self.device, dtype=GPU_DTYPE
             )
 
             # Compute loss in single GPU batch
-            loss, pearson, _ = compute_loss_batch(
+            loss, pearson, mse = compute_loss_batch(
                 angles_tensor, block_data, start_shift,
                 trajectory_angle, self.angle_range, self.mse_weight
             )
@@ -112,11 +132,16 @@ class ScipyDEOptimizer(BaseBlockOptimizer):
             # Track best
             loss_np = loss.cpu().numpy()
             pearson_np = pearson.cpu().numpy()
+            mse_np = mse.cpu().numpy()
 
             best_idx = np.argmin(loss_np)
             if loss_np[best_idx] < best_result['loss']:
-                best_result['loss'] = loss_np[best_idx]
-                best_result['pearson'] = pearson_np[best_idx]
+                best_result['loss'] = float(loss_np[best_idx])
+                best_result['pearson'] = float(pearson_np[best_idx])
+                best_result['mse'] = float(mse_np[best_idx])
+                # score = pearson - mse_weight * mse_norm, loss = -score + penalty
+                # Approximate score from loss (may have penalty)
+                best_result['score'] = -float(loss_np[best_idx])
                 best_result['angles'] = angles_population[best_idx].copy()
 
             return loss_np
@@ -137,25 +162,48 @@ class ScipyDEOptimizer(BaseBlockOptimizer):
             workers=1,  # We batch on GPU, no CPU parallelism needed
         )
 
+        opt_ms = int((time.perf_counter() - start_time) * 1000)
+
         # Use tracked best (may be better than result.x due to early stopping)
         if best_result['angles'] is not None and best_result['loss'] < result.fun:
             best_angles = best_result['angles']
             best_pearson = best_result['pearson']
+            best_mse = best_result['mse']
+            best_loss = best_result['loss']
+            best_score = best_result['score']
         else:
             best_angles = result.x
-            # Recompute pearson for result.x
+            best_loss = float(result.fun)
+            # Recompute all metrics for result.x
             angles_tensor = torch.tensor(
                 best_angles.reshape(1, -1), device=self.device, dtype=GPU_DTYPE
             )
-            _, pearson, _ = compute_loss_batch(
+            loss, pearson, mse = compute_loss_batch(
                 angles_tensor, block_data, start_shift,
                 trajectory_angle, self.angle_range, self.mse_weight
             )
-            best_pearson = pearson[0].item()
+            best_pearson = float(pearson[0].item())
+            best_mse = float(mse[0].item())
+            best_score = -best_loss
 
         # Compute end shift
         shift_deltas = np.tan(np.deg2rad(best_angles)) * seg_md_lens
         best_end_shift = start_shift + shift_deltas.sum()
+
+        if return_result:
+            return OptimizeResult(
+                pearson=best_pearson,
+                mse=best_mse,
+                score=best_score,
+                loss=best_loss,
+                end_shift=best_end_shift,
+                angles=best_angles.astype(np.float32),
+                start_shift=start_shift,
+                n_segments=n_seg,
+                n_evaluations=n_evaluations[0],
+                opt_ms=opt_ms,
+                ref_angle=trajectory_angle,
+            )
 
         return best_pearson, best_end_shift, best_angles.astype(np.float32), start_shift
 

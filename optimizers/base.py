@@ -1,8 +1,37 @@
 """Base class for block optimizers."""
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Tuple, List, Optional
 import numpy as np
+
+
+@dataclass
+class OptimizeResult:
+    """Result of block optimization with all metrics for logging."""
+    # Core results
+    pearson: float
+    mse: float
+    score: float  # pearson - mse_weight * mse_norm (higher is better)
+    loss: float   # -score + penalty (lower is better, for minimization)
+    end_shift: float
+    angles: np.ndarray
+    start_shift: float
+
+    # Metadata
+    n_segments: int = 0
+    n_evaluations: int = 0  # Number of fitness evaluations
+    opt_ms: int = 0  # Optimization time in ms
+    ref_angle: float = 0.0  # Reference trajectory angle
+
+    @property
+    def angle_diffs(self) -> np.ndarray:
+        """Angle differences from reference."""
+        return self.angles - self.ref_angle
+
+    def to_tuple(self) -> Tuple[float, float, np.ndarray, float]:
+        """Legacy tuple format for backward compatibility."""
+        return (self.pearson, self.end_shift, self.angles, self.start_shift)
 
 
 class BaseBlockOptimizer(ABC):

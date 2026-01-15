@@ -164,8 +164,27 @@ class RunLogger:
             print(f"DB error on log_well_result: {e}")
 
     def log_block(self, well_name: str, block_idx: int, n_angles: int,
-                  n_combos: int, opt_ms: int, best_score: float, best_pearson: float):
-        """Log single optimization block."""
+                  n_combos: int, opt_ms: int, best_score: float, best_pearson: float,
+                  best_mse: float = None, best_loss: float = None,
+                  n_segments: int = None, ref_angle: float = None,
+                  angles: list = None, angle_diffs: list = None):
+        """Log single optimization block with full metrics.
+
+        Args:
+            well_name: Well name
+            block_idx: Block index (0, 1, 2...)
+            n_angles: Number of angle steps per segment
+            n_combos: Total number of combinations evaluated (or estimated)
+            opt_ms: Optimization time in milliseconds
+            best_score: Best score (pearson - mse_weight * mse_norm)
+            best_pearson: Best Pearson correlation
+            best_mse: Best MSE value
+            best_loss: Best loss value (for minimization)
+            n_segments: Number of segments in block
+            ref_angle: Reference trajectory angle
+            angles: List of optimal angles per segment
+            angle_diffs: List of angle differences from ref_angle
+        """
         if not self.conn:
             return
 
@@ -173,16 +192,31 @@ class RunLogger:
             with self.conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO blocks (run_id, well_name, block_idx,
-                                       n_angles, n_combos, opt_ms, best_score, best_pearson)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                       n_angles, n_combos, opt_ms, best_score, best_pearson,
+                                       best_mse, best_loss, n_segments, ref_angle, angles, angle_diffs)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (run_id, well_name, block_idx) DO UPDATE SET
                         n_angles = EXCLUDED.n_angles,
                         n_combos = EXCLUDED.n_combos,
                         opt_ms = EXCLUDED.opt_ms,
                         best_score = EXCLUDED.best_score,
-                        best_pearson = EXCLUDED.best_pearson
-                """, (self.run_id, well_name, int(block_idx), int(n_angles), int(n_combos),
-                      int(opt_ms), float(best_score), float(best_pearson)))
+                        best_pearson = EXCLUDED.best_pearson,
+                        best_mse = EXCLUDED.best_mse,
+                        best_loss = EXCLUDED.best_loss,
+                        n_segments = EXCLUDED.n_segments,
+                        ref_angle = EXCLUDED.ref_angle,
+                        angles = EXCLUDED.angles,
+                        angle_diffs = EXCLUDED.angle_diffs
+                """, (
+                    self.run_id, well_name, int(block_idx), int(n_angles), int(n_combos),
+                    int(opt_ms), float(best_score), float(best_pearson),
+                    float(best_mse) if best_mse is not None else None,
+                    float(best_loss) if best_loss is not None else None,
+                    int(n_segments) if n_segments is not None else None,
+                    float(ref_angle) if ref_angle is not None else None,
+                    json.dumps(angles) if angles is not None else None,
+                    json.dumps(angle_diffs) if angle_diffs is not None else None,
+                ))
             self.conn.commit()
         except Exception as e:
             print(f"DB error on log_block: {e}")

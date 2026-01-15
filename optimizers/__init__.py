@@ -16,7 +16,7 @@ Usage:
     result = optimizer.optimize(segment_indices, start_shift, ...)
 """
 
-from .base import BaseBlockOptimizer
+from .base import BaseBlockOptimizer, OptimizeResult
 from .objective import (
     BlockData,
     prepare_block_data,
@@ -26,7 +26,6 @@ from .objective import (
 )
 
 # Registry of available optimizers
-# Will be populated as implementations are added
 _OPTIMIZER_REGISTRY = {}
 
 
@@ -36,6 +35,12 @@ def register_optimizer(name: str):
         _OPTIMIZER_REGISTRY[name.upper()] = cls
         return cls
     return decorator
+
+
+# Import algorithm modules to trigger registration
+from . import bruteforce
+from . import scipy_de
+from . import evotorch_algos
 
 
 def get_optimizer(name: str, **kwargs) -> BaseBlockOptimizer:
@@ -69,6 +74,7 @@ AVAILABLE_ALGORITHMS = property(lambda self: list_optimizers())
 
 __all__ = [
     'BaseBlockOptimizer',
+    'OptimizeResult',
     'BlockData',
     'prepare_block_data',
     'compute_loss_batch',
