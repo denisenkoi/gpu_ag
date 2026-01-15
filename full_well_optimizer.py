@@ -1708,7 +1708,7 @@ if __name__ == '__main__':
     parser.add_argument('--skip-memory-check', action='store_true', help='Skip GPU memory check')
     parser.add_argument('--json-dir', type=str, default=None, help='Directory to save JSON interpretations')
     parser.add_argument('--algorithm', type=str, default='BRUTEFORCE',
-                        choices=['BRUTEFORCE', 'CMAES', 'SNES', 'MONTECARLO', 'SCIPY_DE', 'SCIPY_DE_AGGRESSIVE'],
+                        choices=['BRUTEFORCE', 'LEGACY', 'CMAES', 'SNES', 'MONTECARLO', 'SCIPY_DE', 'SCIPY_DE_AGGRESSIVE'],
                         help='Optimization algorithm (default: BRUTEFORCE)')
     parser.add_argument('--evo-popsize', type=int, default=100, help='Population size for evolutionary algorithms')
     parser.add_argument('--evo-maxiter', type=int, default=50, help='Max iterations for evolutionary algorithms')
