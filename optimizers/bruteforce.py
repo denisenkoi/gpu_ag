@@ -4,11 +4,12 @@ BruteForce optimizer - exhaustive grid search.
 Current best algorithm: RMSE 2.99m on 100 wells.
 """
 
+import time
 import torch
 import numpy as np
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Union
 
-from .base import BaseBlockOptimizer
+from .base import BaseBlockOptimizer, OptimizeResult
 from . import register_optimizer, prepare_block_data, compute_score_batch, GPU_DTYPE
 
 
@@ -70,11 +71,16 @@ class BruteForceOptimizer(BaseBlockOptimizer):
         well_gr: np.ndarray,
         type_tvd: np.ndarray,
         type_gr: np.ndarray,
+        return_result: bool = False,
         **kwargs
-    ) -> Tuple[float, float, np.ndarray, float]:
+    ) -> Union[Tuple[float, float, np.ndarray, float], OptimizeResult]:
         """
         Optimize by exhaustive enumeration of angle grid.
+
+        Args:
+            return_result: If True, return OptimizeResult with full metrics
         """
+        t_start = time.perf_counter()
         n_seg = len(segment_indices)
 
         # Prepare block data (transfers to GPU once)
@@ -114,11 +120,14 @@ class BruteForceOptimizer(BaseBlockOptimizer):
         best_score = -1e9
         best_idx_global = 0
         best_pearson = 0.0
+        best_mse = 0.0
+        n_evaluations = 0
 
         # Process in chunks
         for chunk_start in range(0, n_combos, self.chunk_size):
             chunk_end = min(chunk_start + self.chunk_size, n_combos)
             chunk_n = chunk_end - chunk_start
+            n_evaluations += chunk_n
 
             # Generate angle combinations on GPU from flat indices
             indices = torch.arange(chunk_start, chunk_end, device=self.device, dtype=torch.long)
@@ -131,7 +140,7 @@ class BruteForceOptimizer(BaseBlockOptimizer):
                 divisor *= grid_sizes[seg]
 
             # Compute scores
-            scores, pearsons, _ = compute_score_batch(
+            scores, pearsons, mse_norms = compute_score_batch(
                 chunk_angles, block_data, start_shift,
                 trajectory_angle, self.angle_range, self.mse_weight
             )
@@ -144,6 +153,7 @@ class BruteForceOptimizer(BaseBlockOptimizer):
                 best_score = chunk_best_score
                 best_idx_global = chunk_start + chunk_best_idx
                 best_pearson = pearsons[chunk_best_idx].item()
+                best_mse = mse_norms[chunk_best_idx].item()
 
             # Periodic cache clear
             if chunk_start > 0 and chunk_start % (20 * self.chunk_size) == 0:
@@ -160,5 +170,23 @@ class BruteForceOptimizer(BaseBlockOptimizer):
         # Compute end shift for best solution
         shift_deltas = np.tan(np.deg2rad(best_angles)) * seg_md_lens
         best_end_shift = start_shift + shift_deltas.sum()
+
+        if return_result:
+            opt_ms = int((time.perf_counter() - t_start) * 1000)
+            # loss = -score (for minimization, no penalty since within grid)
+            best_loss = -best_score
+            return OptimizeResult(
+                pearson=best_pearson,
+                mse=best_mse,
+                score=best_score,
+                loss=best_loss,
+                end_shift=best_end_shift,
+                angles=best_angles,
+                start_shift=start_shift,
+                n_segments=n_seg,
+                n_evaluations=n_evaluations,
+                opt_ms=opt_ms,
+                ref_angle=trajectory_angle,
+            )
 
         return best_pearson, best_end_shift, best_angles, start_shift

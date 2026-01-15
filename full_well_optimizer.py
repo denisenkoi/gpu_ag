@@ -1195,8 +1195,29 @@ def optimize_full_well(
             best_angles = opt_result.angles
             # Store result for logging
             _last_opt_result = opt_result
+        elif algorithm.upper() == 'BRUTEFORCE':
+            # BruteForce with full metrics logging
+            opt = get_optimizer(
+                'BRUTEFORCE',
+                device=DEVICE,
+                angle_range=effective_angle_range,
+                angle_step=angle_step,
+                mse_weight=mse_weight,
+                chunk_size=chunk_size,
+            )
+            opt_result = opt.optimize(
+                seg_indices, current_shift, traj_angle,
+                well_md, well_tvd, well_gr,
+                type_tvd, type_gr,
+                return_result=True,  # Get full OptimizeResult
+            )
+            pearson = opt_result.pearson
+            end_shift = opt_result.end_shift
+            best_angles = opt_result.angles
+            # Store result for logging
+            _last_opt_result = opt_result
         else:
-            # Brute-force (default)
+            # Legacy path for other algorithms (CMAES, SNES, etc.)
             pearson, end_shift, best_angles, _ = optimize_segment_block_gpu(
                 seg_indices, current_shift, traj_angle,
                 well_md, well_tvd, well_gr,
