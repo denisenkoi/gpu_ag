@@ -229,7 +229,7 @@ def compute_loss_batch(
     # penalty = max(0, threshold - std) * weight
     selfcorr_penalty = torch.zeros(batch_size, device=device, dtype=GPU_DTYPE)
     if tvt_all is not None:
-        bin_size = 0.10  # 10cm bins (optimal from grid search)
+        bin_size = 0.05  # 5cm bins
         for i in range(batch_size):
             tvt_i = tvt_all[i]
             gr_i = block_data.zone_gr

@@ -57,7 +57,7 @@ def compute_landing_std(
     well_md: np.ndarray,
     well_tvd: np.ndarray,
     well_gr: np.ndarray,
-    bin_size: float = 0.10,
+    bin_size: float = 0.05,
     smooth_window: int = 51,
 ) -> float:
     """
@@ -1078,7 +1078,7 @@ def optimize_full_well(
     sc_weight: float = 0.0,  # Weight for SC penalty (0 = disabled)
     segments_per_block: int = 5,
     end_zone_angle_reduction: float = 0.5,  # Reduce angle_range near end
-    start_from_landing: bool = True,  # Start from landing_end_87_200 instead of OTSU
+    start_from_landing: bool = True,  # Start from landing_end_dls instead of OTSU
     verbose: bool = False,
     algorithm: str = 'BRUTEFORCE',  # BRUTEFORCE, CMAES, SNES, or MONTECARLO
     evo_popsize: int = 100,  # Population size for evolutionary algorithms
@@ -1096,7 +1096,7 @@ def optimize_full_well(
     Optimize entire well from landing point to end using PELT-based segmentation.
 
     Strategy:
-    1. Start from landing_end_87_200 (or OTSU if start_from_landing=False)
+    1. Start from landing_end_dls (or OTSU if start_from_landing=False)
     2. Get ALL PELT boundaries from start to well end
     3. Take 5 segments at a time, optimize with GPU brute-force
     4. end_shift of block N = start_shift of block N+1
@@ -1110,7 +1110,7 @@ def optimize_full_well(
         mse_power: MSE penalty power (0, 0.5, or 1.0)
         segments_per_block: Segments to optimize together (5)
         end_zone_angle_reduction: Factor to reduce angle_range near end
-        start_from_landing: If True, start from landing_end_87_200; else use OTSU
+        start_from_landing: If True, start from landing_end_dls; else use OTSU
         verbose: Print progress
 
     Returns:
@@ -1149,8 +1149,8 @@ def optimize_full_well(
 
     # Determine start point
     if start_from_landing:
-        # Start from landing_end_87_200 (honest baseline point)
-        zone_start = float(well_data.get('landing_end_87_200', well_md[len(well_md) // 3]))
+        # Start from landing_end_dls (DLS-stable point + 600ft)
+        zone_start = float(well_data.get('landing_end_dls', well_data.get('landing_end_87_200', well_md[len(well_md) // 3])))
         zone_start = max(zone_start, log_md[0])  # Ensure within log range
     else:
         # Find OTSU zone - use it as starting point
@@ -1169,8 +1169,8 @@ def optimize_full_well(
     if verbose:
         print(f"  PELT found {len(all_boundaries)} boundaries from MD {zone_start:.1f} to {well_end_md:.1f}")
 
-    # Initial shift from baseline (TVT=const from 87°+200m) - NO CHEATING!
-    baseline_md = float(well_data.get('landing_end_87_200', well_md[len(well_md) // 2]))
+    # Initial shift from baseline (TVT=const from landing_end_dls) - NO CHEATING!
+    baseline_md = float(well_data.get('landing_end_dls', well_data.get('landing_end_87_200', well_md[len(well_md) // 2])))
     baseline_idx = int(np.searchsorted(well_md, baseline_md))
     tvt_baseline = well_tvd[baseline_idx] - interpolate_shift_at_md(well_data, well_md[baseline_idx])
     zone_start_idx_for_shift = int(np.searchsorted(well_md, zone_start))
@@ -1600,9 +1600,9 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter:
             ref_end_md = min(well_md[-1], log_md[-1])
             ref_end_shift = interpolate_shift_at_md(well_data, ref_end_md)
 
-            # Baseline (TVT=const from 87° + 200m point)
+            # Baseline (TVT=const from landing_end_dls point)
             well_tvd = well_data['well_tvd'].numpy()
-            baseline_md = float(well_data.get('landing_end_87_200', well_md[len(well_md)//2]))
+            baseline_md = float(well_data.get('landing_end_dls', well_data.get('landing_end_87_200', well_md[len(well_md)//2])))
             baseline_idx = min(int(np.searchsorted(well_md, baseline_md)), len(well_md) - 1)
             tvt_at_baseline = well_tvd[baseline_idx] - interpolate_shift_at_md(well_data, well_md[baseline_idx])
             baseline_shift = well_tvd[np.searchsorted(well_md, ref_end_md) - 1] - tvt_at_baseline
