@@ -24,6 +24,7 @@ from .objective import (
     compute_loss_batch,
     compute_score_batch,
     compute_std_batch,
+    compute_prefix_std,
     GPU_DTYPE,
 )
 
@@ -43,6 +44,7 @@ def register_optimizer(name: str):
 from . import bruteforce
 from . import greedy_bruteforce
 from . import continuous_beam
+from . import lookback_beam
 from . import scipy_de
 from . import evotorch_algos
 

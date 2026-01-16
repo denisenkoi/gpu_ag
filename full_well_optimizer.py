@@ -1189,6 +1189,73 @@ def optimize_full_well(
     if verbose:
         print(f"  Trend angle (zone_start {zone_start:.0f}m → end {well_end_md:.0f}m): {trend_angle:+.2f}°")
 
+    # LOOKBACK_BEAM: process ENTIRE well in one call (not per-block)
+    if algorithm.upper() == 'LOOKBACK_BEAM':
+        # Build ALL segment indices from all_boundaries
+        all_seg_indices = []
+        prev_md = zone_start
+        for bnd_md in all_boundaries:
+            s_idx = int(np.searchsorted(well_md, prev_md))
+            e_idx = int(np.searchsorted(well_md, bnd_md))
+            if e_idx > s_idx:
+                all_seg_indices.append((s_idx, e_idx))
+            prev_md = bnd_md
+
+        if verbose:
+            print(f"  LOOKBACK_BEAM: {len(all_seg_indices)} segments total")
+
+        # Initialize optimizer with parameters from env
+        stage_size = int(os.getenv('LOOKBACK_STAGE_SIZE', '2'))
+        beam_width = int(os.getenv('LOOKBACK_BEAM_WIDTH', '100'))
+        pearson_lookback = int(os.getenv('LOOKBACK_PEARSON', '300'))
+        std_lookback = int(os.getenv('LOOKBACK_STD', '600'))
+
+        opt = get_optimizer(
+            'LOOKBACK_BEAM',
+            device=DEVICE,
+            angle_range=angle_range,
+            angle_step=angle_step,
+            mse_weight=mse_weight,
+            chunk_size=chunk_size,
+            stage_size=stage_size,
+            beam_width=beam_width,
+            pearson_lookback=pearson_lookback,
+            std_lookback=std_lookback,
+        )
+
+        # Single call for entire well
+        opt_result = opt.optimize(
+            all_seg_indices, current_shift, trend_angle,
+            well_md, well_tvd, well_gr,
+            type_tvd, type_gr,
+            return_result=True,
+        )
+
+        # Build segments from result
+        seg_md_lens = np.array([well_md[e] - well_md[s] for s, e in all_seg_indices])
+        shift_deltas = np.tan(np.radians(opt_result.angles)) * seg_md_lens
+
+        all_segments = []
+        seg_start_shift = current_shift
+        for i, (s_idx, e_idx) in enumerate(all_seg_indices):
+            seg_end_shift = seg_start_shift + shift_deltas[i]
+            all_segments.append(OptimizedSegment(
+                start_md=well_md[s_idx],
+                end_md=well_md[e_idx-1] if e_idx > s_idx else well_md[s_idx],
+                start_shift=seg_start_shift,
+                end_shift=seg_end_shift,
+                angle_deg=opt_result.angles[i],
+                pearson=opt_result.score,
+            ))
+            seg_start_shift = seg_end_shift
+
+        # Log to database
+        logger = get_logger()
+        if logger:
+            logger.finalize_well_segments(well_name)
+
+        return all_segments
+
     all_segments = []
     current_md = zone_start
     boundary_idx = 0
@@ -1855,8 +1922,8 @@ if __name__ == '__main__':
     parser.add_argument('--skip-memory-check', action='store_true', help='Skip GPU memory check')
     parser.add_argument('--json-dir', type=str, default=None, help='Directory to save JSON interpretations')
     parser.add_argument('--algorithm', type=str, default='BRUTEFORCE',
-                        choices=['BRUTEFORCE', 'GREEDY_BF', 'LEGACY', 'CMAES', 'SNES', 'MONTECARLO', 'SCIPY_DE', 'SCIPY_DE_AGGRESSIVE'],
-                        help='Optimization algorithm (default: BRUTEFORCE). GREEDY_BF uses beam search.')
+                        choices=['BRUTEFORCE', 'GREEDY_BF', 'LOOKBACK_BEAM', 'LEGACY', 'CMAES', 'SNES', 'MONTECARLO', 'SCIPY_DE', 'SCIPY_DE_AGGRESSIVE'],
+                        help='Optimization algorithm (default: BRUTEFORCE). LOOKBACK_BEAM uses continuous beam with lookback.')
     parser.add_argument('--evo-popsize', type=int, default=100, help='Population size for evolutionary algorithms')
     parser.add_argument('--evo-maxiter', type=int, default=50, help='Max iterations for evolutionary algorithms')
     parser.add_argument('--mc-samples', type=int, default=4000000, help='Number of samples for Monte Carlo')

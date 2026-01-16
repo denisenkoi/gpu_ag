@@ -157,6 +157,8 @@ def compute_loss_batch(
     mse_weight: float = 5.0,
     selfcorr_threshold: float = 0.0,
     selfcorr_weight: float = 0.0,
+    pearson_lookback: int = 0,
+    std_lookback: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute loss for a batch of angle combinations with lookback prefix support.
@@ -168,11 +170,13 @@ def compute_loss_batch(
         trajectory_angle: Reference angle (for penalty calculation)
         angle_range: Max allowed deviation from trajectory_angle
         mse_weight: Weight for MSE term
+        pearson_lookback: Points from prefix for Pearson (0 = all prefix)
+        std_lookback: Points from prefix for Self-corr STD (0 = all prefix)
 
     Returns:
         Tuple of:
         - loss: (batch,) loss values (lower is better)
-        - pearson: (batch,) Pearson correlations (computed on prefix + new)
+        - pearson: (batch,) Pearson correlations (computed on lookback + new)
         - mse_norm: (batch,) normalized MSE (computed on new only, prefix MSE is fixed)
         - new_synthetic: (batch, n_new_points) projection for new segments (to save in beam)
         - new_tvt: (batch, n_new_points) TVT for new segments (to save in beam)
@@ -248,16 +252,24 @@ def compute_loss_batch(
         interp_gr = gr_low + t * (gr_high - gr_low)
         new_synthetic[:, local_start:local_end] = interp_gr.reshape(batch_size, seg_n)
 
-    # Combine prefix + new for Pearson (prefix is same for all batch, expand it)
+    # Combine prefix + new for Pearson (with optional lookback limit)
     if n_prefix_points > 0:
-        prefix_synthetic_expanded = prefix.synthetic.unsqueeze(0).expand(batch_size, -1)
+        # Apply pearson_lookback: use only last N points from prefix
+        if pearson_lookback > 0 and n_prefix_points > pearson_lookback:
+            lookback_synthetic = prefix.synthetic[-pearson_lookback:]
+            lookback_zone_gr = prefix.zone_gr[-pearson_lookback:]
+        else:
+            lookback_synthetic = prefix.synthetic
+            lookback_zone_gr = prefix.zone_gr
+
+        prefix_synthetic_expanded = lookback_synthetic.unsqueeze(0).expand(batch_size, -1)
         full_synthetic = torch.cat([prefix_synthetic_expanded, new_synthetic], dim=1)
-        full_zone_gr = torch.cat([prefix.zone_gr, block_data.zone_gr])
+        full_zone_gr = torch.cat([lookback_zone_gr, block_data.zone_gr])
     else:
         full_synthetic = new_synthetic
         full_zone_gr = block_data.zone_gr
 
-    # Pearson correlation on FULL data (prefix + new)
+    # Pearson correlation on lookback + new data
     full_zone_gr_mean = full_zone_gr.mean()
     full_zone_gr_centered = full_zone_gr - full_zone_gr_mean
     full_zone_gr_ss = (full_zone_gr_centered**2).sum()
@@ -275,13 +287,21 @@ def compute_loss_batch(
     mse = ((block_data.zone_gr - new_synthetic)**2).mean(dim=1)
     mse_norm = mse / (block_data.zone_gr_var + 1e-10)
 
-    # Self-correlation penalty on FULL data (prefix + new)
+    # Self-correlation penalty (with separate std_lookback)
     selfcorr_penalty = torch.zeros(batch_size, device=device, dtype=GPU_DTYPE)
     if selfcorr_threshold > 0 and selfcorr_weight > 0:
         if n_prefix_points > 0:
-            prefix_tvt_expanded = prefix.tvt.unsqueeze(0).expand(batch_size, -1)
+            # Apply std_lookback: use only last N points from prefix for STD
+            if std_lookback > 0 and n_prefix_points > std_lookback:
+                lookback_tvt = prefix.tvt[-std_lookback:]
+                lookback_gr_smooth = prefix.zone_gr_smooth[-std_lookback:]
+            else:
+                lookback_tvt = prefix.tvt
+                lookback_gr_smooth = prefix.zone_gr_smooth
+
+            prefix_tvt_expanded = lookback_tvt.unsqueeze(0).expand(batch_size, -1)
             full_tvt = torch.cat([prefix_tvt_expanded, new_tvt], dim=1)
-            full_zone_gr_smooth = torch.cat([prefix.zone_gr_smooth, block_data.zone_gr_smooth])
+            full_zone_gr_smooth = torch.cat([lookback_gr_smooth, block_data.zone_gr_smooth])
         else:
             full_tvt = new_tvt
             full_zone_gr_smooth = block_data.zone_gr_smooth
@@ -337,12 +357,18 @@ def compute_score_batch(
     mse_weight: float = 5.0,
     selfcorr_threshold: float = 0.0,
     selfcorr_weight: float = 0.0,
+    pearson_lookback: int = 0,
+    std_lookback: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute score for a batch of angle combinations.
 
     Same as compute_loss_batch but returns score (higher is better).
     Use this for algorithms that maximize.
+
+    Args:
+        pearson_lookback: Points from prefix for Pearson (0 = all prefix)
+        std_lookback: Points from prefix for Self-corr STD (0 = all prefix)
 
     Returns:
         Tuple of:
@@ -354,7 +380,7 @@ def compute_score_batch(
     """
     loss, pearson, mse_norm, new_synthetic, new_tvt = compute_loss_batch(
         angles_batch, block_data, prefix, trajectory_angle, angle_range, mse_weight,
-        selfcorr_threshold, selfcorr_weight
+        selfcorr_threshold, selfcorr_weight, pearson_lookback, std_lookback
     )
     score = -loss  # Invert for maximization
     return score, pearson, mse_norm, new_synthetic, new_tvt
@@ -437,3 +463,45 @@ def compute_std_batch(
         std_values[i] = bin_means.std()
 
     return std_values
+
+
+def compute_prefix_std(prefix: BeamPrefix, bin_size: float = 0.05) -> float:
+    """
+    Compute STD(bin_means) from accumulated prefix data.
+
+    For LOOKBACK_BEAM hybrid selection - computes STD from full prefix,
+    not just new segments.
+
+    Args:
+        prefix: BeamPrefix with accumulated tvt and zone_gr_smooth
+        bin_size: Bin size in meters (default 0.05 = 5cm)
+
+    Returns:
+        STD of bin means, or inf if not enough data
+    """
+    tvt = prefix.tvt
+    gr_smooth = prefix.zone_gr_smooth
+
+    if len(tvt) < 100:
+        return float('inf')
+
+    device = tvt.device
+    tvt_min = tvt.min()
+    bin_idx = ((tvt - tvt_min) / bin_size).long()
+    n_bins = int(bin_idx.max().item()) + 1
+
+    if n_bins < 5:
+        return float('inf')
+
+    bin_sums = torch.zeros(n_bins, device=device, dtype=GPU_DTYPE)
+    bin_counts = torch.zeros(n_bins, device=device, dtype=GPU_DTYPE)
+
+    bin_sums.scatter_add_(0, bin_idx, gr_smooth)
+    bin_counts.scatter_add_(0, bin_idx, torch.ones_like(gr_smooth))
+
+    valid_mask = bin_counts > 0
+    if valid_mask.sum() < 5:
+        return float('inf')
+
+    bin_means = bin_sums[valid_mask] / bin_counts[valid_mask]
+    return bin_means.std().item()
