@@ -352,12 +352,14 @@ def optimize_segment_block_gpu(
     FINE_ANGLE_STEP = float(os.getenv('FINE_ANGLE_STEP', '0.1'))  # degrees for long segments
 
     angle_grids = []
+    steps_used = []
     for seg_len in seg_md_lens:
         # Adaptive step: 0.1° for long segments, default for short
         if seg_len > LONG_SEGMENT_THRESHOLD:
             step = FINE_ANGLE_STEP
         else:
             step = angle_step
+        steps_used.append(step)
         n_steps = int(2 * angle_range / step) + 1
         grid = np.linspace(
             trajectory_angle - angle_range,
@@ -1142,8 +1144,8 @@ def optimize_full_well(
     if selfcorr_factor > 0 and selfcorr_weight > 0:
         landing_std = compute_landing_std(well_data, well_md, well_tvd, well_gr)
         dynamic_selfcorr_threshold = landing_std * selfcorr_factor
-        if verbose:
-            print(f"  Selfcorr: landing_std={landing_std:.2f}, threshold={dynamic_selfcorr_threshold:.2f} (factor={selfcorr_factor})")
+        # Always print selfcorr params for debugging
+        print(f"  Selfcorr: landing_std={landing_std:.2f}, threshold={dynamic_selfcorr_threshold:.2f} (factor={selfcorr_factor}, weight={selfcorr_weight})")
     else:
         dynamic_selfcorr_threshold = 0.0
 
@@ -1311,11 +1313,13 @@ def optimize_full_well(
         elif algorithm.upper() == 'BRUTEFORCE':
             # BruteForce with full metrics logging
             # Use dynamic threshold computed from landing_std
+            fine_step = float(os.getenv('FINE_ANGLE_STEP', '0.1'))
             opt = get_optimizer(
                 'BRUTEFORCE',
                 device=DEVICE,
                 angle_range=effective_angle_range,
                 angle_step=angle_step,
+                fine_step=fine_step,
                 mse_weight=mse_weight,
                 chunk_size=chunk_size,
                 selfcorr_threshold=dynamic_selfcorr_threshold,
@@ -1331,6 +1335,32 @@ def optimize_full_well(
             end_shift = opt_result.end_shift
             best_angles = opt_result.angles
             # Store result for logging
+            _last_opt_result = opt_result
+        elif algorithm.upper() == 'GREEDY_BF':
+            # Greedy/hierarchical bruteforce - beam search
+            stage_size = int(os.getenv('GREEDY_STAGE_SIZE', '3'))
+            beam_width = int(os.getenv('GREEDY_BEAM_WIDTH', '100'))
+            select_by_std = os.getenv('GREEDY_SELECT_BY_STD', '1') == '1'
+            opt = get_optimizer(
+                'GREEDY_BF',
+                device=DEVICE,
+                angle_range=effective_angle_range,
+                angle_step=angle_step,
+                mse_weight=mse_weight,
+                chunk_size=chunk_size,
+                stage_size=stage_size,
+                beam_width=beam_width,
+                select_by_std=select_by_std,
+            )
+            opt_result = opt.optimize(
+                seg_indices, current_shift, traj_angle,
+                well_md, well_tvd, well_gr,
+                type_tvd, type_gr,
+                return_result=True,
+            )
+            pearson = opt_result.pearson
+            end_shift = opt_result.end_shift
+            best_angles = opt_result.angles
             _last_opt_result = opt_result
         else:
             # Legacy path for other algorithms (CMAES, SNES, etc.)
@@ -1495,7 +1525,7 @@ def test_single_well(well_name: str = "Well1221~EGFDL"):
         print(f"Time: {t1-t0:.1f}s")
 
 
-def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter: list = None, json_dir: str = None,
+def test_all_wells(angle_range: float = 1.5, angle_step: float = 0.2, save_csv: bool = True, well_filter: list = None, json_dir: str = None,
                    algorithm: str = 'BRUTEFORCE', evo_popsize: int = 100, evo_maxiter: int = 50,
                    mc_samples: int = 4000000, mse_weight: float = 0.1, use_advisor: bool = False,
                    advisor_max_dist: float = 1000.0, advisor_smoothing: float = 100.0,
@@ -1617,6 +1647,7 @@ def test_all_wells(angle_range: float = 1.5, save_csv: bool = True, well_filter:
             segments = optimize_full_well(
                 well_name, well_data,
                 angle_range=angle_range,
+                angle_step=angle_step,
                 mse_weight=mse_weight,
                 verbose=False,
                 algorithm=algorithm,
@@ -1824,8 +1855,8 @@ if __name__ == '__main__':
     parser.add_argument('--skip-memory-check', action='store_true', help='Skip GPU memory check')
     parser.add_argument('--json-dir', type=str, default=None, help='Directory to save JSON interpretations')
     parser.add_argument('--algorithm', type=str, default='BRUTEFORCE',
-                        choices=['BRUTEFORCE', 'LEGACY', 'CMAES', 'SNES', 'MONTECARLO', 'SCIPY_DE', 'SCIPY_DE_AGGRESSIVE'],
-                        help='Optimization algorithm (default: BRUTEFORCE)')
+                        choices=['BRUTEFORCE', 'GREEDY_BF', 'LEGACY', 'CMAES', 'SNES', 'MONTECARLO', 'SCIPY_DE', 'SCIPY_DE_AGGRESSIVE'],
+                        help='Optimization algorithm (default: BRUTEFORCE). GREEDY_BF uses beam search.')
     parser.add_argument('--evo-popsize', type=int, default=100, help='Population size for evolutionary algorithms')
     parser.add_argument('--evo-maxiter', type=int, default=50, help='Max iterations for evolutionary algorithms')
     parser.add_argument('--mc-samples', type=int, default=4000000, help='Number of samples for Monte Carlo')
@@ -1868,7 +1899,7 @@ if __name__ == '__main__':
 
     if args.all:
         print("\n" + "="*70)
-        test_all_wells(angle_range=args.angle_range, json_dir=args.json_dir,
+        test_all_wells(angle_range=args.angle_range, angle_step=args.angle_step, json_dir=args.json_dir,
                        algorithm=args.algorithm, evo_popsize=args.evo_popsize, evo_maxiter=args.evo_maxiter,
                        mc_samples=args.mc_samples, mse_weight=args.mse_weight, use_advisor=args.use_advisor,
                        advisor_max_dist=args.advisor_max_dist, advisor_smoothing=args.advisor_smoothing,
@@ -1878,7 +1909,7 @@ if __name__ == '__main__':
                        run_id=args.run_id, timeout=args.timeout)
     elif args.wells:
         print("\n" + "="*70)
-        test_all_wells(angle_range=args.angle_range, well_filter=args.wells, json_dir=args.json_dir,
+        test_all_wells(angle_range=args.angle_range, angle_step=args.angle_step, well_filter=args.wells, json_dir=args.json_dir,
                        algorithm=args.algorithm, evo_popsize=args.evo_popsize, evo_maxiter=args.evo_maxiter,
                        mc_samples=args.mc_samples, mse_weight=args.mse_weight, use_advisor=args.use_advisor,
                        advisor_max_dist=args.advisor_max_dist, advisor_smoothing=args.advisor_smoothing,

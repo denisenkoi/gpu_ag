@@ -22,6 +22,7 @@ from .objective import (
     prepare_block_data,
     compute_loss_batch,
     compute_score_batch,
+    compute_std_batch,
     GPU_DTYPE,
 )
 
@@ -39,6 +40,8 @@ def register_optimizer(name: str):
 
 # Import algorithm modules to trigger registration
 from . import bruteforce
+from . import greedy_bruteforce
+from . import continuous_beam
 from . import scipy_de
 from . import evotorch_algos
 
@@ -79,6 +82,7 @@ __all__ = [
     'prepare_block_data',
     'compute_loss_batch',
     'compute_score_batch',
+    'compute_std_batch',
     'GPU_DTYPE',
     'get_optimizer',
     'register_optimizer',
