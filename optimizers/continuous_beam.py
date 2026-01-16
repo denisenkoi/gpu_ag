@@ -15,7 +15,7 @@ from typing import Tuple, List, Optional, Union
 from dataclasses import dataclass
 
 from .base import BaseBlockOptimizer, OptimizeResult
-from . import register_optimizer, prepare_block_data, compute_score_batch, compute_std_batch, GPU_DTYPE
+from . import register_optimizer, prepare_block_data, compute_score_batch, compute_std_batch, BeamPrefix, GPU_DTYPE
 
 
 @dataclass

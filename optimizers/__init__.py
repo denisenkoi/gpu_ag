@@ -19,6 +19,7 @@ Usage:
 from .base import BaseBlockOptimizer, OptimizeResult
 from .objective import (
     BlockData,
+    BeamPrefix,
     prepare_block_data,
     compute_loss_batch,
     compute_score_batch,
@@ -79,6 +80,7 @@ __all__ = [
     'BaseBlockOptimizer',
     'OptimizeResult',
     'BlockData',
+    'BeamPrefix',
     'prepare_block_data',
     'compute_loss_batch',
     'compute_score_batch',

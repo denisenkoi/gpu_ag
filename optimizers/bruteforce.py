@@ -10,7 +10,7 @@ import numpy as np
 from typing import Tuple, List, Optional, Union
 
 from .base import BaseBlockOptimizer, OptimizeResult
-from . import register_optimizer, prepare_block_data, compute_score_batch, compute_std_batch, GPU_DTYPE
+from . import register_optimizer, prepare_block_data, compute_score_batch, compute_std_batch, BeamPrefix, GPU_DTYPE
 
 
 def get_chunk_size() -> int:
@@ -93,6 +93,9 @@ class BruteForceOptimizer(BaseBlockOptimizer):
             type_tvd, type_gr, self.device
         )
 
+        # Create empty prefix for first block
+        prefix = BeamPrefix.empty(start_shift, self.device)
+
         # Segment MD lengths for adaptive step
         seg_md_lens = np.array([well_md[e] - well_md[s] for s, e in segment_indices], dtype=np.float32)
 
@@ -151,8 +154,8 @@ class BruteForceOptimizer(BaseBlockOptimizer):
                 divisor *= grid_sizes[seg]
 
             # Compute scores (WITHOUT selfcorr penalty in first pass)
-            scores, pearsons, mse_norms = compute_score_batch(
-                chunk_angles, block_data, start_shift,
+            scores, pearsons, mse_norms, _, _ = compute_score_batch(
+                chunk_angles, block_data, prefix,
                 trajectory_angle, self.angle_range, self.mse_weight,
                 0.0, 0.0  # No selfcorr in first pass
             )
@@ -199,14 +202,14 @@ class BruteForceOptimizer(BaseBlockOptimizer):
                     idx //= grid_sizes[seg]
 
             # Compute scores WITH selfcorr penalty
-            scores_with_penalty, pearsons_final, mse_final = compute_score_batch(
-                top_k_angles, block_data, start_shift,
+            scores_with_penalty, pearsons_final, mse_final, _, _ = compute_score_batch(
+                top_k_angles, block_data, prefix,
                 trajectory_angle, self.angle_range, self.mse_weight,
                 self.selfcorr_threshold, self.selfcorr_weight
             )
 
             # Compute STD for all top-k candidates
-            std_values = compute_std_batch(top_k_angles, block_data, start_shift)
+            std_values = compute_std_batch(top_k_angles, block_data, prefix)
             std_np = std_values.cpu().numpy()
             scores_np = scores_with_penalty.cpu().numpy()
             pearsons_np = pearsons_final.cpu().numpy()

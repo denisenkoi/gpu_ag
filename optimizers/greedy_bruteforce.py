@@ -18,7 +18,7 @@ import numpy as np
 from typing import Tuple, List, Optional, Union
 
 from .base import BaseBlockOptimizer, OptimizeResult
-from . import register_optimizer, prepare_block_data, compute_score_batch, compute_std_batch, GPU_DTYPE
+from . import register_optimizer, prepare_block_data, compute_score_batch, compute_std_batch, BeamPrefix, GPU_DTYPE
 
 
 @register_optimizer('GREEDY_BF')
@@ -79,6 +79,9 @@ class GreedyBruteForceOptimizer(BaseBlockOptimizer):
             type_tvd, type_gr, self.device
         )
 
+        # Create empty prefix for first block
+        prefix = BeamPrefix.empty(start_shift, self.device)
+
         # Segment MD lengths
         seg_md_lens = np.array([well_md[e] - well_md[s] for s, e in segment_indices], dtype=np.float32)
 
@@ -124,8 +127,8 @@ class GreedyBruteForceOptimizer(BaseBlockOptimizer):
                 divisor *= grid_size
 
             # Compute scores
-            scores, _, _ = compute_score_batch(
-                chunk_angles, block_data, start_shift,
+            scores, _, _, _, _ = compute_score_batch(
+                chunk_angles, block_data, prefix,
                 trajectory_angle, self.angle_range, self.mse_weight,
                 0.0, 0.0
             )
@@ -174,8 +177,8 @@ class GreedyBruteForceOptimizer(BaseBlockOptimizer):
                         divisor *= grid_size
 
                     # Compute scores
-                    scores, _, _ = compute_score_batch(
-                        chunk_angles, block_data, start_shift,
+                    scores, _, _, _, _ = compute_score_batch(
+                        chunk_angles, block_data, prefix,
                         trajectory_angle, self.angle_range, self.mse_weight,
                         0.0, 0.0
                     )
@@ -200,14 +203,14 @@ class GreedyBruteForceOptimizer(BaseBlockOptimizer):
 
         # Compute final scores and STD for all beam candidates
         final_angles = torch.stack(beam_candidates)
-        final_scores, final_pearsons, final_mse = compute_score_batch(
-            final_angles, block_data, start_shift,
+        final_scores, final_pearsons, final_mse, _, _ = compute_score_batch(
+            final_angles, block_data, prefix,
             trajectory_angle, self.angle_range, self.mse_weight,
             0.0, 0.0
         )
 
         if self.select_by_std:
-            final_std = compute_std_batch(final_angles, block_data, start_shift)
+            final_std = compute_std_batch(final_angles, block_data, prefix)
             final_std_np = final_std.cpu().numpy()
             best_idx = np.nanargmin(final_std_np)
             print(f"      Selected by STD: {final_std_np[best_idx]:.2f} (range: {final_std_np.min():.2f}-{final_std_np.max():.2f})")
