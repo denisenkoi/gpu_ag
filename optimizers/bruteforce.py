@@ -52,11 +52,15 @@ class BruteForceOptimizer(BaseBlockOptimizer):
         adaptive_step: bool = True,
         fine_step: float = 0.1,
         long_segment_threshold: float = 50.0,
+        selfcorr_threshold: float = 0.0,
+        selfcorr_weight: float = 0.0,
     ):
         super().__init__(device, angle_range, angle_step, mse_weight, chunk_size)
         self.adaptive_step = adaptive_step
         self.fine_step = fine_step
         self.long_segment_threshold = long_segment_threshold
+        self.selfcorr_threshold = selfcorr_threshold
+        self.selfcorr_weight = selfcorr_weight
 
         if self.chunk_size is None:
             self.chunk_size = get_chunk_size()
@@ -123,7 +127,12 @@ class BruteForceOptimizer(BaseBlockOptimizer):
         best_mse = 0.0
         n_evaluations = 0
 
-        # Process in chunks
+        # For selfcorr penalty: collect top-k candidates for second pass
+        TOP_K = 100 if (self.selfcorr_threshold > 0 and self.selfcorr_weight > 0) else 0
+        top_k_indices = []
+        top_k_scores = []
+
+        # Process in chunks (first pass - without selfcorr penalty)
         for chunk_start in range(0, n_combos, self.chunk_size):
             chunk_end = min(chunk_start + self.chunk_size, n_combos)
             chunk_n = chunk_end - chunk_start
@@ -139,10 +148,11 @@ class BruteForceOptimizer(BaseBlockOptimizer):
                 chunk_angles[:, seg] = grids_gpu[seg][seg_indices]
                 divisor *= grid_sizes[seg]
 
-            # Compute scores
+            # Compute scores (WITHOUT selfcorr penalty in first pass)
             scores, pearsons, mse_norms = compute_score_batch(
                 chunk_angles, block_data, start_shift,
-                trajectory_angle, self.angle_range, self.mse_weight
+                trajectory_angle, self.angle_range, self.mse_weight,
+                0.0, 0.0  # No selfcorr in first pass
             )
 
             # Find best in chunk
@@ -155,9 +165,50 @@ class BruteForceOptimizer(BaseBlockOptimizer):
                 best_pearson = pearsons[chunk_best_idx].item()
                 best_mse = mse_norms[chunk_best_idx].item()
 
+            # Collect top-k candidates for second pass
+            if TOP_K > 0:
+                # Get top candidates from this chunk
+                k = min(TOP_K, chunk_n)
+                topk_vals, topk_idx = torch.topk(scores, k)
+                for i in range(k):
+                    global_idx = chunk_start + topk_idx[i].item()
+                    score_val = topk_vals[i].item()
+                    top_k_indices.append(global_idx)
+                    top_k_scores.append(score_val)
+
             # Periodic cache clear
             if chunk_start > 0 and chunk_start % (20 * self.chunk_size) == 0:
                 torch.cuda.empty_cache()
+
+        # Second pass: apply selfcorr penalty to top-k candidates
+        if TOP_K > 0 and len(top_k_indices) > 0:
+            # Keep only global top-k
+            combined = list(zip(top_k_scores, top_k_indices))
+            combined.sort(reverse=True)
+            combined = combined[:TOP_K]
+
+            # Reconstruct angles for top-k candidates
+            top_k_angles = torch.zeros((len(combined), n_seg), device=self.device, dtype=GPU_DTYPE)
+            for i, (_, global_idx) in enumerate(combined):
+                idx = global_idx
+                for seg in reversed(range(n_seg)):
+                    seg_idx = idx % grid_sizes[seg]
+                    top_k_angles[i, seg] = grids_gpu[seg][seg_idx]
+                    idx //= grid_sizes[seg]
+
+            # Compute scores WITH selfcorr penalty
+            scores_with_penalty, pearsons_final, mse_final = compute_score_batch(
+                top_k_angles, block_data, start_shift,
+                trajectory_angle, self.angle_range, self.mse_weight,
+                self.selfcorr_threshold, self.selfcorr_weight
+            )
+
+            # Find best among top-k with penalty applied
+            final_best_idx = scores_with_penalty.argmax().item()
+            best_score = scores_with_penalty[final_best_idx].item()
+            best_idx_global = combined[final_best_idx][1]
+            best_pearson = pearsons_final[final_best_idx].item()
+            best_mse = mse_final[final_best_idx].item()
 
         # Reconstruct best angles from index
         best_angles = np.zeros(n_seg, dtype=np.float32)

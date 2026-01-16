@@ -51,6 +51,108 @@ def get_sc_landing_rmse(well_name: str) -> float:
             _SC_BASELINE_CACHE = dict(zip(df['well_name'], df['gr_var_mean']))
     return _SC_BASELINE_CACHE.get(well_name, 4.0)  # Default to median ~4%
 
+
+def compute_landing_std(
+    well_data: dict,
+    well_md: np.ndarray,
+    well_tvd: np.ndarray,
+    well_gr: np.ndarray,
+    bin_size: float = 0.10,
+    smooth_window: int = 51,
+) -> float:
+    """
+    Compute STD(bin_means) for landing part using REF interpretation.
+
+    This gives us baseline self-correlation quality for this well.
+    Dynamic threshold = landing_std * factor (e.g., 0.8)
+
+    Args:
+        well_data: Dataset entry with REF interpretation
+        well_md, well_tvd, well_gr: Well arrays (normalized)
+        bin_size: TVT bin size in meters (default 10cm)
+        smooth_window: Savgol filter window (default 51)
+
+    Returns:
+        STD of bin means for landing part, or 12.0 if can't compute
+    """
+    from scipy.signal import savgol_filter
+
+    # Get landing_end_md
+    landing_end_md = well_data.get('landing_end_dls')
+    if landing_end_md is None:
+        landing_end_md = well_data.get('landing_end_87_200')
+    if landing_end_md is None:
+        return 12.0  # Default fallback
+    landing_end_md = float(landing_end_md)
+
+    # Get REF interpretation from dataset
+    ref_segment_mds = well_data.get('ref_segment_mds')
+    ref_start_shifts = well_data.get('ref_start_shifts')
+    ref_shifts = well_data.get('ref_shifts')
+
+    if ref_segment_mds is None or len(ref_segment_mds) == 0:
+        return 12.0  # Default fallback
+
+    ref_segment_mds = np.asarray(ref_segment_mds)
+    ref_start_shifts = np.asarray(ref_start_shifts)
+    ref_shifts = np.asarray(ref_shifts)
+
+    # Compute TVT using REF shifts
+    n_pts = len(well_md)
+    tvt = np.full(n_pts, np.nan)
+    n_segs = len(ref_segment_mds)
+
+    for i in range(n_segs):
+        start_md = ref_segment_mds[i]
+        end_md = ref_segment_mds[i + 1] if i < n_segs - 1 else well_md.max() + 1.0
+        start_shift = ref_start_shifts[i]
+        end_shift = ref_shifts[i]
+
+        mask = (well_md >= start_md) & (well_md < end_md)
+        if not np.any(mask):
+            continue
+
+        md_pts = well_md[mask]
+        ratio = (md_pts - start_md) / (end_md - start_md) if end_md > start_md else 0.0
+        shifts = start_shift + ratio * (end_shift - start_shift)
+        tvt[mask] = well_tvd[mask] - shifts
+
+    # Filter to landing part only
+    landing_mask = (well_md <= landing_end_md) & ~np.isnan(tvt)
+    if landing_mask.sum() < 100:
+        return 12.0  # Not enough points
+
+    tvt_landing = tvt[landing_mask]
+    gr_landing = well_gr[landing_mask]
+
+    # Smooth GR
+    if len(gr_landing) >= smooth_window:
+        gr_smooth = savgol_filter(gr_landing, smooth_window, 3)
+    else:
+        gr_smooth = gr_landing
+
+    # Compute bin means
+    tvt_min, tvt_max = tvt_landing.min(), tvt_landing.max()
+    n_bins = int((tvt_max - tvt_min) / bin_size) + 1
+    if n_bins < 5:
+        return 12.0
+
+    bin_idx = ((tvt_landing - tvt_min) / bin_size).astype(int)
+    bin_idx = np.clip(bin_idx, 0, n_bins - 1)
+
+    bin_sums = np.zeros(n_bins)
+    bin_counts = np.zeros(n_bins)
+    np.add.at(bin_sums, bin_idx, gr_smooth)
+    np.add.at(bin_counts, bin_idx, 1)
+
+    valid_bins = bin_counts > 0
+    if valid_bins.sum() < 5:
+        return 12.0
+
+    bin_means = bin_sums[valid_bins] / bin_counts[valid_bins]
+    return float(np.std(bin_means))
+
+
 # Read typelog mode from env
 USE_PSEUDO_TYPELOG = os.getenv('USE_PSEUDO_TYPELOG', 'True').lower() in ('true', '1', 'yes')
 
@@ -246,8 +348,8 @@ def optimize_segment_block_gpu(
     seg_md_lens = np.array([well_md[e] - well_md[s] for s, e in segment_indices], dtype=np.float32)
 
     # Generate angle candidates (adaptive step for long segments)
-    LONG_SEGMENT_THRESHOLD = 50.0  # meters
-    FINE_ANGLE_STEP = 0.1  # degrees for long segments
+    LONG_SEGMENT_THRESHOLD = float(os.getenv('LONG_SEGMENT_THRESHOLD', '50.0'))  # meters
+    FINE_ANGLE_STEP = float(os.getenv('FINE_ANGLE_STEP', '0.1'))  # degrees for long segments
 
     angle_grids = []
     for seg_len in seg_md_lens:
@@ -1034,6 +1136,17 @@ def optimize_full_well(
     # tvd_shift from metadata - honest mode without data leakage
     tvd_shift = typelog_meta['tvd_shift']
 
+    # Compute landing STD for dynamic selfcorr threshold
+    selfcorr_factor = float(os.getenv('SELFCORR_FACTOR', '0.0'))  # 0.8 = threshold is 80% of landing_std
+    selfcorr_weight = float(os.getenv('SELFCORR_WEIGHT', '0.0'))
+    if selfcorr_factor > 0 and selfcorr_weight > 0:
+        landing_std = compute_landing_std(well_data, well_md, well_tvd, well_gr)
+        dynamic_selfcorr_threshold = landing_std * selfcorr_factor
+        if verbose:
+            print(f"  Selfcorr: landing_std={landing_std:.2f}, threshold={dynamic_selfcorr_threshold:.2f} (factor={selfcorr_factor})")
+    else:
+        dynamic_selfcorr_threshold = 0.0
+
     # Determine start point
     if start_from_landing:
         # Start from landing_end_87_200 (honest baseline point)
@@ -1197,6 +1310,7 @@ def optimize_full_well(
             _last_opt_result = opt_result
         elif algorithm.upper() == 'BRUTEFORCE':
             # BruteForce with full metrics logging
+            # Use dynamic threshold computed from landing_std
             opt = get_optimizer(
                 'BRUTEFORCE',
                 device=DEVICE,
@@ -1204,6 +1318,8 @@ def optimize_full_well(
                 angle_step=angle_step,
                 mse_weight=mse_weight,
                 chunk_size=chunk_size,
+                selfcorr_threshold=dynamic_selfcorr_threshold,
+                selfcorr_weight=selfcorr_weight,
             )
             opt_result = opt.optimize(
                 seg_indices, current_shift, traj_angle,

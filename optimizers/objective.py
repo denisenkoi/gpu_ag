@@ -118,6 +118,8 @@ def compute_loss_batch(
     trajectory_angle: float,
     angle_range: float,
     mse_weight: float = 5.0,
+    selfcorr_threshold: float = 0.0,
+    selfcorr_weight: float = 0.0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute loss for a batch of angle combinations.
@@ -164,6 +166,12 @@ def compute_loss_batch(
     # Build synthetic GR
     synthetic = torch.zeros((batch_size, block_data.n_points), device=device, dtype=GPU_DTYPE)
 
+    # Accumulate TVT for selfcorr penalty (only if enabled)
+    if selfcorr_threshold > 0 and selfcorr_weight > 0:
+        tvt_all = torch.zeros((batch_size, block_data.n_points), device=device, dtype=GPU_DTYPE)
+    else:
+        tvt_all = None
+
     # Track out-of-range conditions
     MAX_TVT_EXTRAPOLATION = 0.1524  # 0.5 ft
     out_of_range_conditions = []
@@ -174,6 +182,10 @@ def compute_loss_batch(
         seg_shifts = seg_start + ratio.unsqueeze(0) * (seg_end - seg_start)
 
         tvt = seg_tvd.unsqueeze(0) - seg_shifts
+
+        # Accumulate TVT for selfcorr penalty
+        if tvt_all is not None:
+            tvt_all[:, local_start:local_end] = tvt
 
         # Check TypeLog range violation
         below_min = block_data.type_tvd[0] - tvt
@@ -213,10 +225,44 @@ def compute_loss_batch(
     mse = ((block_data.zone_gr - synthetic)**2).mean(dim=1)
     mse_norm = mse / (block_data.zone_gr_var + 1e-10)
 
+    # Self-correlation penalty: penalize suspiciously low std(bin_means)
+    # penalty = max(0, threshold - std) * weight
+    selfcorr_penalty = torch.zeros(batch_size, device=device, dtype=GPU_DTYPE)
+    if tvt_all is not None:
+        bin_size = 0.10  # 10cm bins (optimal from grid search)
+        for i in range(batch_size):
+            tvt_i = tvt_all[i]
+            gr_i = block_data.zone_gr
+
+            tvt_min = tvt_i.min()
+            bin_idx = ((tvt_i - tvt_min) / bin_size).long()
+            n_bins = int(bin_idx.max().item()) + 1
+
+            if n_bins < 5:
+                continue
+
+            bin_sums = torch.zeros(n_bins, device=device, dtype=GPU_DTYPE)
+            bin_counts = torch.zeros(n_bins, device=device, dtype=GPU_DTYPE)
+
+            bin_sums.scatter_add_(0, bin_idx, gr_i)
+            bin_counts.scatter_add_(0, bin_idx, torch.ones_like(gr_i))
+
+            valid_mask = bin_counts > 0
+            if valid_mask.sum() < 5:
+                continue
+
+            bin_means = bin_sums[valid_mask] / bin_counts[valid_mask]
+            std_val = bin_means.std()
+
+            # Penalize solutions with HIGH std (bad self-correlation)
+            # NOTE: User explicitly requested to penalize HIGH std, not low!
+            # DO NOT CHANGE THIS DIRECTION WITHOUT USER APPROVAL!
+            selfcorr_penalty[i] = torch.clamp(std_val - selfcorr_threshold, min=0) * selfcorr_weight
+
     # Score (maximize) -> Loss (minimize)
     # score = pearson - mse_weight * mse_norm
-    # loss = -score + angle_penalty
-    loss = -pearson + mse_weight * mse_norm + angle_penalty
+    # loss = -score + angle_penalty + selfcorr_penalty
+    loss = -pearson + mse_weight * mse_norm + angle_penalty + selfcorr_penalty
 
     # Penalize out-of-range solutions
     if out_of_range_conditions:
@@ -237,6 +283,8 @@ def compute_score_batch(
     trajectory_angle: float,
     angle_range: float,
     mse_weight: float = 5.0,
+    selfcorr_threshold: float = 0.0,
+    selfcorr_weight: float = 0.0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute score for a batch of angle combinations.
@@ -251,7 +299,8 @@ def compute_score_batch(
         - mse_norm: (batch,) normalized MSE values
     """
     loss, pearson, mse_norm = compute_loss_batch(
-        angles_batch, block_data, start_shift, trajectory_angle, angle_range, mse_weight
+        angles_batch, block_data, start_shift, trajectory_angle, angle_range, mse_weight,
+        selfcorr_threshold, selfcorr_weight
     )
     score = -loss  # Invert for maximization
     return score, pearson, mse_norm
