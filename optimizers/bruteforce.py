@@ -10,7 +10,7 @@ import numpy as np
 from typing import Tuple, List, Optional, Union
 
 from .base import BaseBlockOptimizer, OptimizeResult
-from . import register_optimizer, prepare_block_data, compute_score_batch, GPU_DTYPE
+from . import register_optimizer, prepare_block_data, compute_score_batch, compute_std_batch, GPU_DTYPE
 
 
 def get_chunk_size() -> int:
@@ -98,11 +98,13 @@ class BruteForceOptimizer(BaseBlockOptimizer):
 
         # Generate angle grids (adaptive step for long segments)
         angle_grids = []
+        steps_used = []
         for seg_len in seg_md_lens:
             if self.adaptive_step and seg_len > self.long_segment_threshold:
                 step = self.fine_step
             else:
                 step = self.angle_step
+            steps_used.append(step)
 
             n_steps = int(2 * self.angle_range / step) + 1
             grid = np.linspace(
@@ -127,8 +129,8 @@ class BruteForceOptimizer(BaseBlockOptimizer):
         best_mse = 0.0
         n_evaluations = 0
 
-        # For selfcorr penalty: collect top-k candidates for second pass
-        TOP_K = 100 if (self.selfcorr_threshold > 0 and self.selfcorr_weight > 0) else 0
+        # EXPERIMENTAL: Always collect top-k for best_std selection
+        TOP_K = 100
         top_k_indices = []
         top_k_scores = []
 
@@ -203,12 +205,37 @@ class BruteForceOptimizer(BaseBlockOptimizer):
                 self.selfcorr_threshold, self.selfcorr_weight
             )
 
-            # Find best among top-k with penalty applied
-            final_best_idx = scores_with_penalty.argmax().item()
-            best_score = scores_with_penalty[final_best_idx].item()
+            # Compute STD for all top-k candidates
+            std_values = compute_std_batch(top_k_angles, block_data, start_shift)
+            std_np = std_values.cpu().numpy()
+            scores_np = scores_with_penalty.cpu().numpy()
+            pearsons_np = pearsons_final.cpu().numpy()
+            mse_np = mse_final.cpu().numpy()
+
+            # EXPERIMENTAL: Select by best STD (lowest) instead of best score
+            best_std_idx = np.nanargmin(std_np)
+            final_best_idx = best_std_idx
+
+            best_score = scores_np[final_best_idx]
             best_idx_global = combined[final_best_idx][1]
-            best_pearson = pearsons_final[final_best_idx].item()
-            best_mse = mse_final[final_best_idx].item()
+            best_pearson = pearsons_np[final_best_idx]
+            best_mse = mse_np[final_best_idx]
+
+            # Log stats for top-k candidates
+            valid_std = std_np[~np.isnan(std_np)]
+            if len(valid_std) > 0:
+                top1_idx = 0  # Best by score (no penalty)
+
+                # Get angles for both candidates
+                top1_angles = top_k_angles[top1_idx].cpu().numpy()
+                winner_angles = top_k_angles[final_best_idx].cpu().numpy()
+
+                print(f"    [top-{len(combined)}]")
+                print(f"      top1_score:  STD={std_np[top1_idx]:.2f} Pearson={pearsons_np[top1_idx]:.3f} MSE={mse_np[top1_idx]:.3f} Score={scores_np[top1_idx]:.3f}")
+                print(f"        angles: {[f'{a:.2f}' for a in top1_angles]}")
+                print(f"      WINNER(std): STD={std_np[final_best_idx]:.2f} Pearson={pearsons_np[final_best_idx]:.3f} MSE={mse_np[final_best_idx]:.3f} Score={scores_np[final_best_idx]:.3f}")
+                print(f"        angles: {[f'{a:.2f}' for a in winner_angles]}")
+                print(f"      ranges:      STD={valid_std.min():.2f}-{valid_std.max():.2f} Pearson={pearsons_np.min():.3f}-{pearsons_np.max():.3f} MSE={mse_np.min():.3f}-{mse_np.max():.3f}")
 
         # Reconstruct best angles from index
         best_angles = np.zeros(n_seg, dtype=np.float32)
