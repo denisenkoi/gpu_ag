@@ -4,6 +4,7 @@ Plot well gamma vs projected gamma (synt_curve) for visual correlation check.
 Supports both numpy and torch projection for comparison.
 """
 
+import os
 import sys
 import logging
 from pathlib import Path
@@ -15,6 +16,8 @@ import matplotlib.pyplot as plt
 # Add paths
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent / "cpu_baseline"))
+
+DATASET_PATH = os.environ.get('DATASET_PATH', 'dataset/gpu_ag_dataset.pt')
 
 from cpu_baseline.typewell_provider import extend_pseudo_with_typelog
 from numpy_funcs.projection import calc_horizontal_projection_numpy
@@ -34,8 +37,7 @@ METERS_TO_FEET = 3.28084
 
 def load_dataset():
     """Load full dataset."""
-    dataset_path = Path(__file__).parent / "dataset" / "gpu_ag_dataset.pt"
-    return torch.load(dataset_path, map_location='cpu', weights_only=False)
+    return torch.load(DATASET_PATH, map_location='cpu', weights_only=False)
 
 
 def stitch_typewell(data, mode='OLD'):

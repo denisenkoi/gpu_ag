@@ -3,6 +3,7 @@
 Test full_well_optimizer on 4 target wells with new typelog_preprocessing.
 """
 
+import os
 import sys
 import time
 import torch
@@ -14,6 +15,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from full_well_optimizer import optimize_full_well
 from numpy_funcs.interpretation import interpolate_shift_at_md
 
+DATASET_PATH = os.environ.get('DATASET_PATH', 'dataset/gpu_ag_dataset.pt')
+
 def test_wells():
     wells = [
         'Well1898~EGFDU',
@@ -23,7 +26,7 @@ def test_wells():
     ]
 
     print("Loading dataset...")
-    ds = torch.load('dataset/gpu_ag_dataset.pt', weights_only=False)
+    ds = torch.load(DATASET_PATH, weights_only=False)
 
     print("\n" + "=" * 70)
     print("Full Well Optimizer Test - 4 Wells")

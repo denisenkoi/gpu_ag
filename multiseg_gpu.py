@@ -3,10 +3,12 @@
 GPU-accelerated multi-segment optimization.
 """
 
+import os
 import torch
 import numpy as np
 from torch_funcs.converters import GPU_DTYPE
 
+DATASET_PATH = os.environ.get('DATASET_PATH', 'dataset/gpu_ag_dataset.pt')
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
@@ -275,7 +277,7 @@ def process_well_gpu(well_name, well, angle_steps=11, shift_range=20.0, shift_st
 if __name__ == '__main__':
     import time
 
-    ds = torch.load('dataset/gpu_ag_dataset.pt', weights_only=False)
+    ds = torch.load(DATASET_PATH, weights_only=False)
     wells = list(ds.keys())
 
     print("=" * 60)

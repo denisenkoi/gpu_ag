@@ -38,6 +38,9 @@ import pandas as pd
 from db_logger import init_logger, get_logger
 from optimizers import get_optimizer
 
+# Dataset path from environment or default
+DATASET_PATH = os.environ.get('DATASET_PATH', 'dataset/gpu_ag_dataset.pt')
+
 # Load SC baseline from CSV (once at module load)
 _SC_BASELINE_PATH = Path(__file__).parent / 'results' / 'self_correlation_baseline.csv'
 _SC_BASELINE_CACHE = {}
@@ -1543,7 +1546,7 @@ def test_single_well(well_name: str = "Well1221~EGFDL"):
     print(f"Testing full well optimization on {well_name}")
     print("=" * 60)
 
-    ds = torch.load('dataset/gpu_ag_dataset.pt', weights_only=False)
+    ds = torch.load(DATASET_PATH, weights_only=False)
 
     if well_name not in ds:
         print(f"Well {well_name} not found!")
@@ -1606,12 +1609,12 @@ def test_all_wells(angle_range: float = 1.5, angle_step: float = 0.2, save_csv: 
     import csv
     from datetime import datetime
 
-    ds = torch.load('dataset/gpu_ag_dataset.pt', weights_only=False)
+    ds = torch.load(DATASET_PATH, weights_only=False)
 
     # Initialize advisor if requested
     advisor = None
     if use_advisor:
-        advisor = NeighborAngleAdvisor('dataset/gpu_ag_dataset.pt')
+        advisor = NeighborAngleAdvisor(DATASET_PATH)
         print("Advisor enabled: using neighbor-based center angles")
 
     # Filter wells if specified

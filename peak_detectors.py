@@ -6,12 +6,15 @@ Architecture:
 - RegionFinder: uses detector to find best region for telescope lever
 """
 
+import os
 import numpy as np
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 from scipy.signal import find_peaks
 from scipy.ndimage import uniform_filter1d
+
+DATASET_PATH = os.environ.get('DATASET_PATH', 'dataset/gpu_ag_dataset.pt')
 
 
 @dataclass
@@ -457,9 +460,8 @@ if __name__ == "__main__":
     import torch
 
     # Load dataset
-    dataset_path = "/mnt/e/Projects/Rogii/gpu_ag/dataset/gpu_ag_dataset.pt"
-    print(f"Loading dataset from {dataset_path}")
-    dataset = torch.load(dataset_path, weights_only=False)
+    print(f"Loading dataset from {DATASET_PATH}")
+    dataset = torch.load(DATASET_PATH, weights_only=False)
 
     # Test on Well162~EGFDL
     well_name = "Well162~EGFDL"

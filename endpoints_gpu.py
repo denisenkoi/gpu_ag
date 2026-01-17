@@ -8,6 +8,7 @@ No angle penalty - let the objective find optimal combination.
 Run: python endpoints_gpu.py --window 10 --search-range 30 --angle-range 0.5
 """
 
+import os
 import sys
 import torch
 import numpy as np
@@ -16,6 +17,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from numpy_funcs.interpretation import interpolate_shift_at_md
+
+DATASET_PATH = os.environ.get('DATASET_PATH', 'dataset/gpu_ag_dataset.pt')
 
 
 def compute_baseline_shift(well_data: dict, end_md: float = None) -> tuple:
@@ -380,9 +383,8 @@ def main():
     print(f"GR smooth: {args.gr_smooth}, Objective: (1 - pearson) * MSE")
     print(f"Start shift: from baseline TVT=const (NO CHEATING)")
 
-    dataset_path = '/mnt/e/Projects/Rogii/gpu_ag/dataset/gpu_ag_dataset.pt'
-    print(f"Loading dataset from {dataset_path}")
-    dataset = torch.load(dataset_path, weights_only=False)
+    print(f"Loading dataset from {DATASET_PATH}")
+    dataset = torch.load(DATASET_PATH, weights_only=False)
     print(f"Loaded {len(dataset)} wells")
 
     results = []

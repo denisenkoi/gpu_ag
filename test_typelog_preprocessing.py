@@ -7,6 +7,7 @@ Expected results:
 - Overlap > 100m
 """
 
+import os
 import sys
 import torch
 import logging
@@ -19,6 +20,8 @@ from cpu_baseline.preprocessing import prepare_typelog
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
+DATASET_PATH = os.environ.get('DATASET_PATH', 'dataset/gpu_ag_dataset.pt')
+
 def test_wells():
     """Test on 4 target wells from specification."""
     wells = [
@@ -29,7 +32,7 @@ def test_wells():
     ]
 
     print("Loading dataset...")
-    ds = torch.load('dataset/gpu_ag_dataset.pt', weights_only=False)
+    ds = torch.load(DATASET_PATH, weights_only=False)
 
     print("\n" + "=" * 70)
     print("TypeLog Preprocessing - Overlap Metrics Test")

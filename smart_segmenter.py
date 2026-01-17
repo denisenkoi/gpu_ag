@@ -21,6 +21,8 @@ from typing import List, Tuple, Optional, Dict, Any
 import ruptures as rpt
 import logging
 
+DATASET_PATH = os.environ.get('DATASET_PATH', 'dataset/gpu_ag_dataset.pt')
+
 logger = logging.getLogger(__name__)
 
 
@@ -525,7 +527,7 @@ if __name__ == "__main__":
     load_dotenv()
 
     # Load dataset
-    dataset = torch.load("dataset/gpu_ag_dataset.pt", weights_only=False)
+    dataset = torch.load(DATASET_PATH, weights_only=False)
     data = dataset["Well162~EGFDL"]
 
     print(f"Well162~EGFDL")

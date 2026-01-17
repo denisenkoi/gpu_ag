@@ -3,13 +3,16 @@
 Compute full-well score from saved interpretations.
 Compares LEGACY vs BRUTEFORCE to find correlation between score and error.
 """
+import os
 import numpy as np
 import torch
 import psycopg2
 from typing import List, Tuple
 
+DATASET_PATH = os.environ.get('DATASET_PATH', 'dataset/gpu_ag_dataset.pt')
+
 # Load dataset
-ds = torch.load('dataset/gpu_ag_dataset.pt', weights_only=False)
+ds = torch.load(DATASET_PATH, weights_only=False)
 
 
 def compute_well_score(

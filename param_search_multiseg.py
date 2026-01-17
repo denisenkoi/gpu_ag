@@ -5,6 +5,7 @@ Parameter search for multi-segment GPU optimization.
 Caches SmartSegmenter boundaries and OTSU zones for speed.
 """
 
+import os
 import sys
 import time
 import torch
@@ -15,6 +16,8 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+DATASET_PATH = os.environ.get('DATASET_PATH', 'dataset/gpu_ag_dataset.pt')
 
 from torch_funcs.converters import GPU_DTYPE
 from smart_segmenter import SmartSegmenter
@@ -399,7 +402,7 @@ def main():
     print("Multi-Segment Parameter Search")
     print("=" * 70)
 
-    ds = torch.load('dataset/gpu_ag_dataset.pt', weights_only=False)
+    ds = torch.load(DATASET_PATH, weights_only=False)
     print(f"Loading {len(ds)} wells...")
 
     cached_wells = cache_all_wells(ds)

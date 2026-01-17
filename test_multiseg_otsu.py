@@ -5,12 +5,15 @@ Test multi-segment optimization on OTSU-selected region.
 Uses SmartSegmenter to find boundaries, then optimizes angles with penalty.
 """
 
+import os
 import sys
 import torch
 import numpy as np
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+DATASET_PATH = os.environ.get('DATASET_PATH', 'dataset/gpu_ag_dataset.pt')
 
 from smart_segmenter import SmartSegmenter, detect_peaks_valleys
 from numpy_funcs.interpretation import interpolate_shift_at_md
@@ -302,7 +305,7 @@ def main():
     print("Multi-Segment Optimization on OTSU Region")
     print("=" * 60)
 
-    ds = torch.load('dataset/gpu_ag_dataset.pt', weights_only=False)
+    ds = torch.load(DATASET_PATH, weights_only=False)
 
     settings = {
         'min_segment_length': 30.0,

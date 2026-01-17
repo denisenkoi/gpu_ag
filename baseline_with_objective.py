@@ -21,6 +21,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from torch_funcs.batch_objective import compute_detailed_metrics_torch
 from torch_funcs.projection import calc_horizontal_projection_batch_torch
 
+DATASET_PATH = os.environ.get('DATASET_PATH', 'dataset/gpu_ag_dataset.pt')
+
 
 def compute_well_angle(well_data: dict, start_md: float, end_md: float) -> float:
     """
@@ -246,9 +248,8 @@ def optimize_endpoint_grid_search(
 
 def main():
     # Load dataset
-    dataset_path = '/mnt/e/Projects/Rogii/gpu_ag/dataset/gpu_ag_dataset.pt'
-    print(f"Loading dataset from {dataset_path}")
-    dataset = torch.load(dataset_path, weights_only=False)
+    print(f"Loading dataset from {DATASET_PATH}")
+    dataset = torch.load(DATASET_PATH, weights_only=False)
     print(f"Loaded {len(dataset)} wells")
 
     results = []

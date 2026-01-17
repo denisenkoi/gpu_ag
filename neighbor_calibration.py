@@ -5,6 +5,7 @@ Runs once per field to collect statistics and generate accuracy config.
 Output: neighbor_accuracy_config.json for use in prod module.
 """
 
+import os
 import torch
 import numpy as np
 import json
@@ -12,6 +13,8 @@ import time
 from typing import Dict, List, Tuple
 import logging
 from datetime import datetime
+
+DATASET_PATH = os.environ.get('DATASET_PATH', 'dataset/gpu_ag_dataset.pt')
 
 logger = logging.getLogger(__name__)
 
@@ -375,7 +378,7 @@ def main():
     """Run calibration for EGFDL field."""
     logging.basicConfig(level=logging.INFO)
 
-    calibrator = NeighborCalibrator('dataset/gpu_ag_dataset.pt')
+    calibrator = NeighborCalibrator(DATASET_PATH)
 
     config = calibrator.calibrate(
         step=10.0,

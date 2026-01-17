@@ -5,11 +5,14 @@ Collects angle difference statistics between neighbors and reference.
 Supports averaged angles over ±delta windows.
 """
 
+import os
 import torch
 import numpy as np
 from typing import Dict, List, Tuple
 import logging
 import time
+
+DATASET_PATH = os.environ.get('DATASET_PATH', 'dataset/gpu_ag_dataset.pt')
 
 logger = logging.getLogger(__name__)
 
@@ -448,7 +451,7 @@ def print_stats_matrix(results, dist_buckets):
 def main():
     logging.basicConfig(level=logging.INFO)
 
-    stats = NeighborStatsGPU('dataset/gpu_ag_dataset.pt')
+    stats = NeighborStatsGPU(DATASET_PATH)
 
     print("Collecting extended statistics for all 100 wells...")
     results, coverage, total, dist_buckets = stats.collect_stats_v2()

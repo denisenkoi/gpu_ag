@@ -7,12 +7,15 @@ Compares:
 2. OTSU RegionFinder region (200m around best peak density)
 """
 
+import os
 import sys
 import torch
 import numpy as np
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+DATASET_PATH = os.environ.get('DATASET_PATH', 'dataset/gpu_ag_dataset.pt')
 
 from peak_detectors import OtsuPeakDetector, RegionFinder
 from torch_funcs.projection import calc_horizontal_projection_batch_torch
@@ -171,7 +174,7 @@ def main():
     print("OTSU Region vs Fixed Window - Endpoint Optimization Test")
     print("=" * 60)
 
-    ds = torch.load('dataset/gpu_ag_dataset.pt', weights_only=False)
+    ds = torch.load(DATASET_PATH, weights_only=False)
     well_name = 'Well1221~EGFDL'
     well = ds[well_name]
 

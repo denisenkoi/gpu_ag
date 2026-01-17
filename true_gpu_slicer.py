@@ -771,7 +771,7 @@ def detect_telescope_lever_md(data: Dict[str, Any], detector_name: str, lookback
 def main():
     parser = argparse.ArgumentParser(description='True GPU Slicer - pure Python slicing')
     parser.add_argument('--dataset', type=str,
-                        default=str(Path(__file__).parent / "dataset" / "gpu_ag_dataset.pt"),
+                        default=os.environ.get('DATASET_PATH', 'dataset/gpu_ag_dataset.pt'),
                         help='Path to PyTorch dataset')
     parser.add_argument('--well', type=str,
                         help='Single well to process (e.g., Well1002_landing~EGFDL)')

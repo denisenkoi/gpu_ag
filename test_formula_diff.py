@@ -2,6 +2,7 @@
 """
 Test to find exact difference between local function and BruteForceOptimizer.
 """
+import os
 import numpy as np
 import torch
 import sys
@@ -13,13 +14,12 @@ from optimizers import get_optimizer
 DEVICE = 'cuda'
 torch.set_printoptions(precision=6)
 
-# Data directory
-DATA_DIR = '/mnt/e/Projects/Rogii/gpu_ag/data'
+DATASET_PATH = os.environ.get('DATASET_PATH', 'dataset/gpu_ag_dataset.pt')
 
 
 def load_dataset():
     """Load dataset from .pt file."""
-    ds = torch.load(f'{DATA_DIR}/../dataset/gpu_ag_dataset.pt', weights_only=False)
+    ds = torch.load(DATASET_PATH, weights_only=False)
     return ds
 
 

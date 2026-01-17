@@ -10,6 +10,7 @@ Usage:
         print(f"{n.well_name} at {n.md:.1f}m: dip={n.dip_angle_deg:.2f}°, dist={n.distance_3d:.1f}m")
 """
 
+import os
 import torch
 import numpy as np
 from dataclasses import dataclass
@@ -412,7 +413,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', default='dataset/gpu_ag_dataset.pt')
+    parser.add_argument('--dataset', default=os.environ.get('DATASET_PATH', 'dataset/gpu_ag_dataset.pt'))
     parser.add_argument('--well', default='Well1042~EGFDL')
     parser.add_argument('--md', type=float, default=4000.0)
     parser.add_argument('--threshold', type=float, default=15.0)

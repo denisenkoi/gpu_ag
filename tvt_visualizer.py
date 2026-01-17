@@ -46,9 +46,11 @@ from cpu_baseline.preprocessing import (
     compute_overlap_metrics
 )
 
+DATASET_PATH = os.environ.get('DATASET_PATH', 'dataset/gpu_ag_dataset.pt')
+
 # Load data once at startup
 print("Loading dataset...")
-DATASET = torch.load('dataset/gpu_ag_dataset.pt', weights_only=False)
+DATASET = torch.load(DATASET_PATH, weights_only=False)
 
 # Try to load baseline errors, fallback to simple well list
 ERRORS = None

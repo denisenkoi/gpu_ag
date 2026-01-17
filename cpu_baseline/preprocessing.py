@@ -32,6 +32,7 @@ import logging
 import numpy as np
 from typing import Dict, Any, Tuple, NamedTuple
 from pathlib import Path
+from scipy.signal import savgol_filter
 
 # Add parent dir to path for gr_smoothing import
 sys.path.insert(0, str(Path(__file__).parent.parent))

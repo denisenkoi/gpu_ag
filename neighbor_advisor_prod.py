@@ -5,12 +5,15 @@ Uses pre-calibrated accuracy config to provide dip predictions
 with expected error bounds for well interpretation.
 """
 
+import os
 import torch
 import numpy as np
 import json
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 import logging
+
+DATASET_PATH = os.environ.get('DATASET_PATH', 'dataset/gpu_ag_dataset.pt')
 
 logger = logging.getLogger(__name__)
 
@@ -405,12 +408,12 @@ def main():
     logging.basicConfig(level=logging.INFO)
 
     advisor = NeighborAdvisorProd(
-        'dataset/gpu_ag_dataset.pt',
+        DATASET_PATH,
         'neighbor_accuracy_config.json'
     )
 
     # Load Well162 trajectory
-    ds = torch.load('dataset/gpu_ag_dataset.pt', weights_only=False)
+    ds = torch.load(DATASET_PATH, weights_only=False)
     well = ds['Well162~EGFDL']
 
     x_surface = well.get('x_surface', 0.0)

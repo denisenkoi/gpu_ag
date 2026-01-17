@@ -5,11 +5,14 @@ Fast parallel search for nearest neighbor wells using CUDA.
 Processes all wells and all MDs in parallel.
 """
 
+import os
 import torch
 import numpy as np
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Tuple
 import logging
+
+DATASET_PATH = os.environ.get('DATASET_PATH', 'dataset/gpu_ag_dataset.pt')
 
 logger = logging.getLogger(__name__)
 
@@ -242,9 +245,9 @@ def benchmark():
     import time
 
     print("Loading dataset...")
-    advisor = NeighborAngleAdvisorGPU('dataset/gpu_ag_dataset.pt')
+    advisor = NeighborAngleAdvisorGPU(DATASET_PATH)
 
-    ds = torch.load('dataset/gpu_ag_dataset.pt', weights_only=False)
+    ds = torch.load(DATASET_PATH, weights_only=False)
     well = ds['Well162~EGFDL']
     perch_md = well['perch_md']
     last_md = well['lateral_well_last_md']

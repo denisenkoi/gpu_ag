@@ -24,6 +24,7 @@ from gpu_executor import GpuAutoGeosteeringExecutor
 
 WELL_NAME = "Well162~EGFDL"
 METERS_TO_FEET = 3.28084
+DATASET_PATH = os.environ.get('DATASET_PATH', 'dataset/gpu_ag_dataset.pt')
 
 
 def main():
@@ -31,8 +32,7 @@ def main():
     print(f"NORMALIZATION_MODE = {os.environ.get('NORMALIZATION_MODE')}")
 
     # Load dataset (same as true_gpu_slicer.py)
-    dataset_path = Path(__file__).parent / "dataset" / "gpu_ag_dataset.pt"
-    dataset = torch.load(dataset_path, map_location='cpu', weights_only=False)
+    dataset = torch.load(DATASET_PATH, map_location='cpu', weights_only=False)
     data = dataset[WELL_NAME]
     data['well_name'] = WELL_NAME
 
