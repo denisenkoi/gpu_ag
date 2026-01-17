@@ -4,6 +4,7 @@ BruteForce optimizer - exhaustive grid search.
 Current best algorithm: RMSE 2.99m on 100 wells.
 """
 
+import os
 import time
 import torch
 import numpy as np
@@ -134,8 +135,8 @@ class BruteForceOptimizer(BaseBlockOptimizer):
         best_mse = 0.0
         n_evaluations = 0
 
-        # EXPERIMENTAL: Always collect top-k for best_std selection
-        TOP_K = 100
+        # EXPERIMENTAL: top-k for best_std selection (BF_TOP_K=0 disables)
+        TOP_K = int(os.environ.get('BF_TOP_K', 100))
         top_k_indices = []
         top_k_scores = []
 

@@ -162,6 +162,9 @@ USE_PSEUDO_TYPELOG = os.getenv('USE_PSEUDO_TYPELOG', 'True').lower() in ('true',
 # SC (Self-Correlation) penalty - DISABLED for now (expensive, not proven useful)
 SC_ENABLED = False
 
+# Landing endpoint mode: 'dls' (new, default) or '87_200' (old, for reproducibility)
+LANDING_MODE = os.getenv('LANDING_MODE', 'dls')  # Set LANDING_MODE=87_200 for old behavior
+
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # GPU configurations
@@ -1154,8 +1157,11 @@ def optimize_full_well(
 
     # Determine start point
     if start_from_landing:
-        # Start from landing_end_dls (DLS-stable point + 600ft)
-        zone_start = float(well_data.get('landing_end_dls', well_data.get('landing_end_87_200', well_md[len(well_md) // 3])))
+        # Start from landing endpoint (mode: dls or 87_200)
+        if LANDING_MODE == '87_200':
+            zone_start = float(well_data.get('landing_end_87_200', well_md[len(well_md) // 3]))
+        else:
+            zone_start = float(well_data.get('landing_end_dls', well_data.get('landing_end_87_200', well_md[len(well_md) // 3])))
         zone_start = max(zone_start, log_md[0])  # Ensure within log range
     else:
         # Find OTSU zone - use it as starting point
@@ -1174,8 +1180,11 @@ def optimize_full_well(
     if verbose:
         print(f"  PELT found {len(all_boundaries)} boundaries from MD {zone_start:.1f} to {well_end_md:.1f}")
 
-    # Initial shift from baseline (TVT=const from landing_end_dls) - NO CHEATING!
-    baseline_md = float(well_data.get('landing_end_dls', well_data.get('landing_end_87_200', well_md[len(well_md) // 2])))
+    # Initial shift from baseline (TVT=const) - NO CHEATING!
+    if LANDING_MODE == '87_200':
+        baseline_md = float(well_data.get('landing_end_87_200', well_md[len(well_md) // 2]))
+    else:
+        baseline_md = float(well_data.get('landing_end_dls', well_data.get('landing_end_87_200', well_md[len(well_md) // 2])))
     baseline_idx = int(np.searchsorted(well_md, baseline_md))
     tvt_baseline = well_tvd[baseline_idx] - interpolate_shift_at_md(well_data, well_md[baseline_idx])
     zone_start_idx_for_shift = int(np.searchsorted(well_md, zone_start))
@@ -1520,12 +1529,12 @@ def optimize_full_well(
                     all_segments.pop()
 
             # Set current position to overlap start
+            # Use PELT boundary directly (not end_md which is well_md[e_idx-1])
+            # to avoid 1-point shift due to discrete sampling
+            current_md = all_boundaries[boundary_idx - 1] if boundary_idx > 0 else zone_start
             if all_segments:
-                current_md = all_segments[-1].end_md
                 current_shift = all_segments[-1].end_shift
             else:
-                # Fallback if all segments removed
-                current_md = all_boundaries[boundary_idx - 1] if boundary_idx > 0 else zone_start
                 current_shift = initial_shift
         else:
             # No overlap - advance by full block
@@ -1703,9 +1712,12 @@ def test_all_wells(angle_range: float = 1.5, angle_step: float = 0.2, save_csv: 
             ref_end_md = min(well_md[-1], log_md[-1])
             ref_end_shift = interpolate_shift_at_md(well_data, ref_end_md)
 
-            # Baseline (TVT=const from landing_end_dls point)
+            # Baseline (TVT=const from landing point)
             well_tvd = well_data['well_tvd'].numpy()
-            baseline_md = float(well_data.get('landing_end_dls', well_data.get('landing_end_87_200', well_md[len(well_md)//2])))
+            if LANDING_MODE == '87_200':
+                baseline_md = float(well_data.get('landing_end_87_200', well_md[len(well_md)//2]))
+            else:
+                baseline_md = float(well_data.get('landing_end_dls', well_data.get('landing_end_87_200', well_md[len(well_md)//2])))
             baseline_idx = min(int(np.searchsorted(well_md, baseline_md)), len(well_md) - 1)
             tvt_at_baseline = well_tvd[baseline_idx] - interpolate_shift_at_md(well_data, well_md[baseline_idx])
             baseline_shift = well_tvd[np.searchsorted(well_md, ref_end_md) - 1] - tvt_at_baseline
