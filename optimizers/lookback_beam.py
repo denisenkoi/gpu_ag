@@ -147,7 +147,7 @@ class LookbackBeamOptimizer(BaseBlockOptimizer):
 
                     # Compute scores with lookback
                     # No selfcorr in scoring - used only in hybrid selection
-                    scores, pearsons, mse_norms, new_synthetic, new_tvt = compute_score_batch(
+                    scores, pearsons, mse_norms, new_synthetic, new_tvt, _ = compute_score_batch(
                         chunk_angles, block_data, cand.prefix,
                         trajectory_angle, self.angle_range, self.mse_weight,
                         0.0, 0.0,  # No selfcorr penalty in scoring

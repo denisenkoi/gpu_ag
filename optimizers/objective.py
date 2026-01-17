@@ -31,6 +31,8 @@ class BeamPrefix:
     zone_gr_smooth: torch.Tensor  # (n_prev_points,) or empty - for self-corr
     tvt: torch.Tensor         # (n_prev_points,) or empty - for self-corr
     end_shift: float          # accumulated shift (replaces start_shift)
+    sse: float = 0.0          # sum of squared errors (for incremental MSE)
+    n_points: int = 0         # number of points (for incremental MSE)
 
     @staticmethod
     def empty(start_shift: float, device: str = 'cuda') -> 'BeamPrefix':
@@ -41,6 +43,8 @@ class BeamPrefix:
             zone_gr_smooth=torch.empty(0, device=device, dtype=GPU_DTYPE),
             tvt=torch.empty(0, device=device, dtype=GPU_DTYPE),
             end_shift=start_shift,
+            sse=0.0,
+            n_points=0,
         )
 
 
@@ -283,8 +287,19 @@ def compute_loss_batch(
         torch.zeros(batch_size, device=device, dtype=GPU_DTYPE)
     )
 
-    # MSE normalized (on NEW segments only - prefix MSE is already fixed)
-    mse = ((block_data.zone_gr - new_synthetic)**2).mean(dim=1)
+    # MSE with incremental calculation (prefix.sse + new_sse) / (prefix.n_points + new_n)
+    new_n = block_data.zone_gr.shape[0]
+    new_sse = ((block_data.zone_gr - new_synthetic)**2).sum(dim=1)  # (batch_size,)
+
+    if prefix.n_points > 0:
+        # Full MSE over all points (prefix + new)
+        full_sse = prefix.sse + new_sse
+        full_n = prefix.n_points + new_n
+        mse = full_sse / full_n
+    else:
+        # First stage - only new points
+        mse = new_sse / new_n
+
     mse_norm = mse / (block_data.zone_gr_var + 1e-10)
 
     # Self-correlation penalty (with separate std_lookback)
@@ -345,7 +360,7 @@ def compute_loss_batch(
             loss
         )
 
-    return loss, pearson, mse_norm, new_synthetic, new_tvt
+    return loss, pearson, mse_norm, new_synthetic, new_tvt, new_sse
 
 
 def compute_score_batch(
@@ -359,7 +374,7 @@ def compute_score_batch(
     selfcorr_weight: float = 0.0,
     pearson_lookback: int = 0,
     std_lookback: int = 0,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute score for a batch of angle combinations.
 
@@ -377,13 +392,14 @@ def compute_score_batch(
         - mse_norm: (batch,) normalized MSE values
         - new_synthetic: (batch, n_new_points) projection for new segments
         - new_tvt: (batch, n_new_points) TVT for new segments
+        - new_sse: (batch,) sum of squared errors for new segments
     """
-    loss, pearson, mse_norm, new_synthetic, new_tvt = compute_loss_batch(
+    loss, pearson, mse_norm, new_synthetic, new_tvt, new_sse = compute_loss_batch(
         angles_batch, block_data, prefix, trajectory_angle, angle_range, mse_weight,
         selfcorr_threshold, selfcorr_weight, pearson_lookback, std_lookback
     )
     score = -loss  # Invert for maximization
-    return score, pearson, mse_norm, new_synthetic, new_tvt
+    return score, pearson, mse_norm, new_synthetic, new_tvt, new_sse
 
 
 def compute_std_batch(

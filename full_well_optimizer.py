@@ -162,8 +162,8 @@ USE_PSEUDO_TYPELOG = os.getenv('USE_PSEUDO_TYPELOG', 'True').lower() in ('true',
 # SC (Self-Correlation) penalty - DISABLED for now (expensive, not proven useful)
 SC_ENABLED = False
 
-# Landing endpoint mode: 'dls' (new, default) or '87_200' (old, for reproducibility)
-LANDING_MODE = os.getenv('LANDING_MODE', 'dls')  # Set LANDING_MODE=87_200 for old behavior
+# Landing endpoint mode: 'dls' (default) or '87_200' (alternative)
+LANDING_MODE = os.getenv('LANDING_MODE', 'dls')  # Default is dls, use LANDING_MODE=87_200 for old BF behavior
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -1163,6 +1163,7 @@ def optimize_full_well(
         else:
             zone_start = float(well_data.get('landing_end_dls', well_data.get('landing_end_87_200', well_md[len(well_md) // 3])))
         zone_start = max(zone_start, log_md[0])  # Ensure within log range
+        print(f"  DEBUG: start_from_landing=True, landing_end_87_200={well_data.get('landing_end_87_200')}, landing_end_dls={well_data.get('landing_end_dls')}, zone_start={zone_start:.1f}, LANDING_MODE={LANDING_MODE}")
     else:
         # Find OTSU zone - use it as starting point
         detector = OtsuPeakDetector()
@@ -1206,11 +1207,14 @@ def optimize_full_well(
         # Build ALL segment indices from all_boundaries
         all_seg_indices = []
         prev_md = zone_start
+        print(f"  DEBUG: zone_start={zone_start:.1f}, first 5 boundaries={[f'{b:.1f}' for b in all_boundaries[:5]]}")
         for bnd_md in all_boundaries:
             s_idx = int(np.searchsorted(well_md, prev_md))
             e_idx = int(np.searchsorted(well_md, bnd_md))
             if e_idx > s_idx:
                 all_seg_indices.append((s_idx, e_idx))
+                if len(all_seg_indices) <= 3:
+                    print(f"  DEBUG seg {len(all_seg_indices)-1}: prev_md={prev_md:.1f}, bnd_md={bnd_md:.1f}, s_idx={s_idx}, well_md[s_idx]={well_md[s_idx]:.1f}")
             prev_md = bnd_md
 
         if verbose:
@@ -1613,10 +1617,15 @@ def test_all_wells(angle_range: float = 1.5, angle_step: float = 0.2, save_csv: 
                    advisor_max_dist: float = 1000.0, advisor_smoothing: float = 100.0,
                    adaptive_smoothing: bool = False, block_overlap: int = 0, center_mode: str = 'trend',
                    description: str = None, cli_args: str = None,
-                   run_id: str = None, timeout: int = 600):
+                   run_id: str = None, timeout: int = 600, chunk_size: int = None,
+                   segments_per_block: int = 5):
     """Test on all 100 wells with CSV export after each well."""
     import csv
     from datetime import datetime
+
+    # Auto-detect chunk_size if not provided
+    if chunk_size is None:
+        chunk_size = get_chunk_size()
 
     ds = torch.load(DATASET_PATH, weights_only=False)
 
@@ -1746,6 +1755,7 @@ def test_all_wells(angle_range: float = 1.5, angle_step: float = 0.2, save_csv: 
                 adaptive_smoothing=adaptive_smoothing,
                 block_overlap=block_overlap,
                 center_mode=center_mode,
+                segments_per_block=segments_per_block,
             )
 
             opt_ms = int((time.time() - t_opt_start) * 1000)
@@ -1951,6 +1961,7 @@ if __name__ == '__main__':
     parser.add_argument('--advisor-smoothing', type=float, default=100.0, help='Smoothing window for neighbor dip angle (meters)')
     parser.add_argument('--adaptive-smoothing', action='store_true', help='Auto-select GR smoothing window based on signal quality')
     parser.add_argument('--block-overlap', type=int, default=0, help='Segments to overlap between blocks (re-optimize)')
+    parser.add_argument('--segments-per-block', type=int, default=5, help='Number of segments to optimize together per block')
     parser.add_argument('--center-mode', type=str, default='trend', choices=['trend', 'local', 'advisor'],
                         help='Center angle mode: trend (global), local (block trajectory), advisor (neighbors)')
     parser.add_argument('--description', '-d', type=str, required=False,
@@ -1969,7 +1980,14 @@ if __name__ == '__main__':
 
     # Require description for batch runs
     if (args.all or args.wells) and not args.description:
-        parser.error("--description is required for batch runs (--all or --wells)")
+        print("\n" + "="*70)
+        print("ERROR: --description is required for batch runs (--all or --wells)")
+        print("="*70)
+        print("\nExample:")
+        print("  python full_well_optimizer.py --wells Well498~EGFDL --description \"My test run\"")
+        print("  python full_well_optimizer.py --all --description \"Full dataset test\"")
+        print()
+        sys.exit(1)
 
     # Capture full CLI args for logging
     cli_args = ' '.join(sys.argv[1:])
@@ -1997,7 +2015,8 @@ if __name__ == '__main__':
                        adaptive_smoothing=args.adaptive_smoothing, block_overlap=args.block_overlap,
                        center_mode=args.center_mode,
                        description=args.description, cli_args=cli_args,
-                       run_id=args.run_id, timeout=args.timeout)
+                       run_id=args.run_id, timeout=args.timeout,
+                       segments_per_block=args.segments_per_block)
     elif args.wells:
         print("\n" + "="*70)
         test_all_wells(angle_range=args.angle_range, angle_step=args.angle_step, well_filter=args.wells, json_dir=args.json_dir,
@@ -2007,6 +2026,7 @@ if __name__ == '__main__':
                        adaptive_smoothing=args.adaptive_smoothing, block_overlap=args.block_overlap,
                        center_mode=args.center_mode,
                        description=args.description, cli_args=cli_args,
-                       run_id=args.run_id, timeout=args.timeout)
+                       run_id=args.run_id, timeout=args.timeout,
+                       segments_per_block=args.segments_per_block)
     else:
         test_single_well()

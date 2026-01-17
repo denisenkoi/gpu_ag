@@ -124,7 +124,7 @@ class ScipyDEOptimizer(BaseBlockOptimizer):
             )
 
             # Compute loss in single GPU batch
-            loss, pearson, mse = compute_loss_batch(
+            loss, pearson, mse, _, _, _ = compute_loss_batch(
                 angles_tensor, block_data, start_shift,
                 trajectory_angle, self.angle_range, self.mse_weight
             )
@@ -178,7 +178,7 @@ class ScipyDEOptimizer(BaseBlockOptimizer):
             angles_tensor = torch.tensor(
                 best_angles.reshape(1, -1), device=self.device, dtype=GPU_DTYPE
             )
-            loss, pearson, mse = compute_loss_batch(
+            loss, pearson, mse, _, _, _ = compute_loss_batch(
                 angles_tensor, block_data, start_shift,
                 trajectory_angle, self.angle_range, self.mse_weight
             )

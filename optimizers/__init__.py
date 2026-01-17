@@ -45,6 +45,7 @@ from . import bruteforce
 from . import greedy_bruteforce
 from . import continuous_beam
 from . import lookback_beam
+from . import lookback_beam_v2
 from . import scipy_de
 from . import evotorch_algos
 

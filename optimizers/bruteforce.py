@@ -157,7 +157,7 @@ class BruteForceOptimizer(BaseBlockOptimizer):
                 divisor *= grid_sizes[seg]
 
             # Compute scores (WITHOUT selfcorr penalty in first pass)
-            scores, pearsons, mse_norms, _, _ = compute_score_batch(
+            scores, pearsons, mse_norms, _, _, _ = compute_score_batch(
                 chunk_angles, block_data, prefix,
                 trajectory_angle, self.angle_range, self.mse_weight,
                 0.0, 0.0  # No selfcorr in first pass
@@ -205,7 +205,7 @@ class BruteForceOptimizer(BaseBlockOptimizer):
                     idx //= grid_sizes[seg]
 
             # Compute scores WITH selfcorr penalty
-            scores_with_penalty, pearsons_final, mse_final, _, _ = compute_score_batch(
+            scores_with_penalty, pearsons_final, mse_final, _, _, _ = compute_score_batch(
                 top_k_angles, block_data, prefix,
                 trajectory_angle, self.angle_range, self.mse_weight,
                 self.selfcorr_threshold, self.selfcorr_weight
@@ -250,6 +250,27 @@ class BruteForceOptimizer(BaseBlockOptimizer):
                 print(f"      WINNER(std): STD={std_np[final_best_idx]:.2f} Pearson={pearsons_np[final_best_idx]:.3f} MSE={mse_np[final_best_idx]:.3f} Score={scores_np[final_best_idx]:.3f}")
                 print(f"        angles: {[f'{a:.2f}' for a in winner_angles]}")
                 print(f"      ranges:      STD={valid_std.min():.2f}-{valid_std.max():.2f} Pearson={pearsons_np.min():.3f}-{pearsons_np.max():.3f} MSE={mse_np.min():.3f}-{mse_np.max():.3f}")
+
+                # Log top-10 for detailed analysis
+                print(f"      --- TOP-10 by score ---")
+                sorted_by_score = np.argsort(scores_np)[::-1]
+                for rank in range(min(10, len(sorted_by_score))):
+                    idx = sorted_by_score[rank]
+                    angles = top_k_angles[idx].cpu().numpy()
+                    print(f"      #{rank+1}: [{','.join(f'{a:.2f}' for a in angles)}] P={pearsons_np[idx]:.3f} M={mse_np[idx]:.3f} S={scores_np[idx]:.3f} STD={std_np[idx]:.2f}")
+
+                # Search for specific reference solution (winner from 5-seg block 0)
+                ref_5seg = [2.31, 2.11, 1.51, 3.91, -0.09][:n_seg]
+                ref_found = False
+                for idx in range(len(top_k_angles)):
+                    angles = top_k_angles[idx].cpu().numpy()
+                    if all(abs(angles[j] - ref_5seg[j]) < 0.15 for j in range(len(ref_5seg))):
+                        rank_in_top100 = int((scores_np > scores_np[idx]).sum()) + 1
+                        print(f"      >>> REF[5seg] found: [{','.join(f'{a:.2f}' for a in angles)}] rank={rank_in_top100}/100 P={pearsons_np[idx]:.3f} M={mse_np[idx]:.3f} S={scores_np[idx]:.3f} STD={std_np[idx]:.2f}")
+                        ref_found = True
+                        break
+                if not ref_found:
+                    print(f"      >>> REF[5seg] {ref_5seg} NOT in top-100")
 
         # Reconstruct best angles from index
         best_angles = np.zeros(n_seg, dtype=np.float32)

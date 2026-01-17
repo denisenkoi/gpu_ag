@@ -1,87 +1,134 @@
-# GPU Autogeosteering Optimization Project
+# GPU AG Worktree - BEAM Optimization Research
 
-## ВАЖНО: Рабочие директории
+**Это worktree** от основного репозитория `/mnt/e/Projects/Rogii/gpu_ag/`
+**Ветка:** `beam_ag_optimization`
+**Цель:** Исследование и улучшение BEAM алгоритмов (LOOKBACK_BEAM, GREEDY_BF)
 
-**Код разрабатывается в:** `/mnt/e/Projects/Rogii/gpu_ag/`
-**Триггеры кладем в:** `/mnt/e/Projects/Rogii/sc/task_queue/`
-**BAT файлы в:** `/mnt/e/Projects/Rogii/bats/`
-**bot_id для триггеров:** `"SSAndAG"`
+---
 
-## Режимы запуска
+## Рабочие директории
 
-**Валидация (без триггеров):**
-- `test_checkpoint.py` - проверка intermediate values
-- `test_numpy_*.py` - проверка numpy функций
-- `test_torch_*.py` - проверка torch функций
-- Запуск: локально через Python
+**Код:** `/mnt/e/Projects/Rogii/gpu_ag_2/` (ЭТОТ worktree, работаем напрямую здесь)
+**Docs:** `/mnt/e/Projects/Rogii/gpu_ag_2/docs/` (локальные для этого worktree)
+**Триггеры:** `/mnt/e/Projects/Rogii/sc/task_queue/` (если нужны BAT)
+**Jira:** RND project, Epic RND-770
 
-**Полный прогон DE (через триггер):**
-- `slicer_de_3iter.bat` - CPU baseline
-- Будущее: `slicer_de_gpu.bat` с флагом `--use-torch`
+---
 
-## Project Structure
+## Python + PyTorch - ВСЕГДА vllm env!
 
-```
-gpu_ag/
-├── cpu_baseline/           # Скопированный CPU код из multi_drilling_emulator
-│   ├── slicer.py           # Main slicer
-│   ├── emulator.py
-│   ├── emulator_processor.py
-│   ├── ag_objects/         # Well, TypeWell, Segment
-│   ├── ag_numerical/       # optimizer_fit (CPU DE)
-│   ├── ag_rewards/         # correlations
-│   └── optimizers/         # PythonAutoGeosteeringExecutor
-│
-├── gpu_ag/                 # GPU implementation (NEW)
-│   ├── torch_objects/      # TorchWell, TorchTypeWell, TorchSegmentBatch
-│   ├── torch_rewards/      # batch_projection, batch_correlations
-│   ├── torch_optimizer/    # EvoTorch DE wrapper
-│   └── converters/         # CPU <-> GPU converters
-│
-├── tests/
-│   └── fixtures/           # Test data
-│
-└── docs/
+```bash
+source ~/miniconda3/etc/profile.d/conda.sh && conda activate vllm
+cd /mnt/e/Projects/Rogii/gpu_ag_2
 ```
 
-## Development Rules
+**НЕ ИСПОЛЬЗОВАТЬ:** base, drilling_emulator, anaconda3, или системный python!
 
-- **cpu_baseline/** - НЕ ТРОГАТЬ, это reference для сравнения
-- **gpu_ag/** - разработка GPU версии
-- Jira project: MDE (Multidrilling Emulator)
-- Epic: ME-20
-- Tasks: ME-21 through ME-26
+---
 
-## Workflow
+## ТЕКУЩИЙ ЛУЧШИЙ РЕЗУЛЬТАТ (без утечки данных)
 
-1. Разрабатываем в gpu_ag/
-2. Тестируем: CPU (cpu_baseline) vs GPU (gpu_ag) на одних данных
-3. Когда готово - интегрируем обратно в multi_drilling_emulator
+| Алгоритм | RMSE | Улучшение | Время | Wells improved |
+|----------|------|-----------|-------|----------------|
+| **LOOKBACK_BEAM_V2** | **6.25m** | **9.8%** | 537s | 53/100 |
+| GREEDY_BF | 6.62m | 4.5% | 507s | 54/100 |
+| BF best_std | 6.70m | 3.3% | 6431s | 51/100 |
 
-## Key Files
+Baseline RMSE: 6.93m
 
-- `cpu_baseline/ag_objects/ag_obj_well.py` - Well class (reference)
-- `cpu_baseline/ag_objects/ag_obj_typewell.py` - TypeWell class (reference)
-- `cpu_baseline/ag_numerical/ag_func_optimizer.py` - CPU DE optimizer
-- `cpu_baseline/ag_rewards/ag_func_correlations.py` - CPU reward functions
+---
 
-## Comments in code
+## Основные алгоритмы
 
-- English only (code style from existing codebase)
+| Алгоритм | Файл | Описание |
+|----------|------|----------|
+| BruteForce | `optimizers/bruteforce.py` | Перебор всех комбинаций в блоке |
+| GREEDY_BF | `optimizers/greedy_bruteforce.py` | Иерархический beam по 2-3 сегмента |
+| LOOKBACK_BEAM | `optimizers/lookback_beam.py` | Beam search с lookback (V1, медленный) |
+| LOOKBACK_BEAM_V2 | `optimizers/lookback_beam_v2.py` | Векторизованный beam (14x быстрее) |
 
-## ВАЖНЫЕ МЕТРИКИ (всегда показывать!)
+---
 
-При анализе результатов слайсинга ОБЯЗАТЕЛЬНО показывать ОБЕ метрики:
+## Запуск экспериментов
+
+```bash
+cd /mnt/e/Projects/Rogii/gpu_ag_2
+source ~/miniconda3/etc/profile.d/conda.sh && conda activate vllm
+
+# Одна скважина (LOOKBACK_BEAM_V2):
+python full_well_optimizer.py --well Well239~EGFDL \
+  --algorithm LOOKBACK_BEAM_V2 --angle-range 2.5 --mse-weight 5 --block-overlap 1
+
+# Все 100 скважин:
+python full_well_optimizer.py --all --algorithm LOOKBACK_BEAM_V2 \
+  --angle-range 2.5 --mse-weight 5 --block-overlap 1 \
+  --description "BEAM V2 experiment"
+
+# На конкретной GPU:
+CUDA_VISIBLE_DEVICES=1 python full_well_optimizer.py ...
+```
+
+---
+
+## Визуализация
+
+```bash
+python interpretation_visualizer.py --well Well239~EGFDL --run-id <RUN_ID> \
+  --output results/viz/well239.png
+```
+
+---
+
+## PostgreSQL логирование
+
+БД `gpu_ag` на localhost (user: rogii, pass: rogii123)
+Мониторинг: `python status.py`
+
+---
+
+## КРИТИЧЕСКИЕ ПРАВИЛА
+
+1. **TVT = TVD - shift** (НЕ TVD + shift!)
+2. **tvd_shift ВСЕГДА применяется к TypeLog!**
+3. **После компактизации — читать docs/AGENT_INSTRUCTIONS.md и docs/worksheet.md**
+4. **GPU: 5090 может быть занята, проверять через nvidia-smi**
+5. **НЕ МЕНЯТЬ ЛОГИКУ без явного подтверждения пользователя!**
+6. **Exit code 1 НЕ ОЗНАЧАЕТ падение!** Долгие процессы (BF, BEAM) могут работать минуты.
+   - ВСЕГДА проверять БД: `SELECT run_id, finished_at, optimized_rmse FROM runs ORDER BY id DESC LIMIT 5`
+   - Или CSV файл результатов
+   - НЕ делать выводы по exit code без проверки реального статуса!
+
+---
+
+## Ключевые структуры данных
+
+```python
+@dataclass
+class BeamPrefix:
+    """Накопленное состояние для beam search."""
+    synthetic: torch.Tensor    # накопленный synthetic GR
+    zone_gr: torch.Tensor      # накопленный zone GR
+    zone_gr_smooth: torch.Tensor  # сглаженный GR
+    tvt: torch.Tensor          # накопленный TVT
+    end_shift: float           # накопленный сдвиг
+
+@dataclass
+class BeamCandidate:
+    """Один кандидат в beam."""
+    prefix: BeamPrefix
+    angles: np.ndarray
+    score: float
+    std: float
+```
+
+---
+
+## Метрики
 
 | Метрика | Описание |
 |---------|----------|
-| **RMSE all points** | По всем точкам всех скважин (интерполяция к сетке 1м) |
-| **RMSE endpoint** | По последним точкам каждой скважины (финальная позиция) |
-
-Endpoint RMSE критически важен - показывает насколько точно попадаем в конечную точку траектории.
-
-Формат отчёта:
-```
-RMSE all points: X.XX m (XX.X ft)
-RMSE endpoint:   X.XX m (XX.X ft)
-```
+| **RMSE all points** | По всем точкам всех скважин (интерполяция к 1м) |
+| **RMSE endpoint** | По последним точкам каждой скважины |
+| **Pearson** | Корреляция synthetic GR с well GR |
+| **MSE** | Ошибка между synthetic и well GR |
+| **STD(bin_means)** | Self-correlation качество (меньше = лучше) |

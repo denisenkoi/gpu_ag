@@ -144,7 +144,7 @@ class ContinuousBeamOptimizer:
                         divisor *= grid_size
 
                     # Compute scores for ONLY new segments, starting from prev_shift
-                    scores, pearsons, _ = compute_score_batch(
+                    scores, pearsons, _, _, _, _ = compute_score_batch(
                         chunk_angles, block_data, prev_shift,
                         trajectory_angle, self.angle_range, self.mse_weight,
                         0.0, 0.0

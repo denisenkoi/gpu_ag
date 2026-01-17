@@ -127,7 +127,7 @@ class GreedyBruteForceOptimizer(BaseBlockOptimizer):
                 divisor *= grid_size
 
             # Compute scores
-            scores, _, _, _, _ = compute_score_batch(
+            scores, _, _, _, _, _ = compute_score_batch(
                 chunk_angles, block_data, prefix,
                 trajectory_angle, self.angle_range, self.mse_weight,
                 0.0, 0.0
@@ -177,7 +177,7 @@ class GreedyBruteForceOptimizer(BaseBlockOptimizer):
                         divisor *= grid_size
 
                     # Compute scores
-                    scores, _, _, _, _ = compute_score_batch(
+                    scores, _, _, _, _, _ = compute_score_batch(
                         chunk_angles, block_data, prefix,
                         trajectory_angle, self.angle_range, self.mse_weight,
                         0.0, 0.0
@@ -203,7 +203,7 @@ class GreedyBruteForceOptimizer(BaseBlockOptimizer):
 
         # Compute final scores and STD for all beam candidates
         final_angles = torch.stack(beam_candidates)
-        final_scores, final_pearsons, final_mse, _, _ = compute_score_batch(
+        final_scores, final_pearsons, final_mse, _, _, _ = compute_score_batch(
             final_angles, block_data, prefix,
             trajectory_angle, self.angle_range, self.mse_weight,
             0.0, 0.0
