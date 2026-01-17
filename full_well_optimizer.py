@@ -1189,8 +1189,8 @@ def optimize_full_well(
     if verbose:
         print(f"  Trend angle (zone_start {zone_start:.0f}m → end {well_end_md:.0f}m): {trend_angle:+.2f}°")
 
-    # LOOKBACK_BEAM: process ENTIRE well in one call (not per-block)
-    if algorithm.upper() == 'LOOKBACK_BEAM':
+    # LOOKBACK_BEAM / LOOKBACK_BEAM_V2: process ENTIRE well in one call (not per-block)
+    if algorithm.upper() in ('LOOKBACK_BEAM', 'LOOKBACK_BEAM_V2'):
         # Build ALL segment indices from all_boundaries
         all_seg_indices = []
         prev_md = zone_start
@@ -1202,7 +1202,7 @@ def optimize_full_well(
             prev_md = bnd_md
 
         if verbose:
-            print(f"  LOOKBACK_BEAM: {len(all_seg_indices)} segments total")
+            print(f"  {algorithm.upper()}: {len(all_seg_indices)} segments total")
 
         # Initialize optimizer with parameters from env
         stage_size = int(os.getenv('LOOKBACK_STAGE_SIZE', '2'))
@@ -1211,7 +1211,7 @@ def optimize_full_well(
         std_lookback = int(os.getenv('LOOKBACK_STD', '600'))
 
         opt = get_optimizer(
-            'LOOKBACK_BEAM',
+            algorithm.upper(),  # Use actual algorithm name
             device=DEVICE,
             angle_range=angle_range,
             angle_step=angle_step,
@@ -1381,6 +1381,8 @@ def optimize_full_well(
             # BruteForce with full metrics logging
             # Use dynamic threshold computed from landing_std
             fine_step = float(os.getenv('FINE_ANGLE_STEP', '0.1'))
+            # Use CLI --select-by-std or env BF_SELECT_BY_STD
+            bf_select_by_std = os.getenv('BF_SELECT_BY_STD', '0') == '1'
             opt = get_optimizer(
                 'BRUTEFORCE',
                 device=DEVICE,
@@ -1391,6 +1393,7 @@ def optimize_full_well(
                 chunk_size=chunk_size,
                 selfcorr_threshold=dynamic_selfcorr_threshold,
                 selfcorr_weight=selfcorr_weight,
+                select_by_std=bf_select_by_std,
             )
             opt_result = opt.optimize(
                 seg_indices, current_shift, traj_angle,
@@ -1922,7 +1925,7 @@ if __name__ == '__main__':
     parser.add_argument('--skip-memory-check', action='store_true', help='Skip GPU memory check')
     parser.add_argument('--json-dir', type=str, default=None, help='Directory to save JSON interpretations')
     parser.add_argument('--algorithm', type=str, default='BRUTEFORCE',
-                        choices=['BRUTEFORCE', 'GREEDY_BF', 'LOOKBACK_BEAM', 'LEGACY', 'CMAES', 'SNES', 'MONTECARLO', 'SCIPY_DE', 'SCIPY_DE_AGGRESSIVE'],
+                        choices=['BRUTEFORCE', 'GREEDY_BF', 'LOOKBACK_BEAM', 'LOOKBACK_BEAM_V2', 'LEGACY', 'CMAES', 'SNES', 'MONTECARLO', 'SCIPY_DE', 'SCIPY_DE_AGGRESSIVE'],
                         help='Optimization algorithm (default: BRUTEFORCE). LOOKBACK_BEAM uses continuous beam with lookback.')
     parser.add_argument('--evo-popsize', type=int, default=100, help='Population size for evolutionary algorithms')
     parser.add_argument('--evo-maxiter', type=int, default=50, help='Max iterations for evolutionary algorithms')
@@ -1941,7 +1944,13 @@ if __name__ == '__main__':
                         help='Continue existing run (uses same run_id, skips completed wells)')
     parser.add_argument('--timeout', type=int, default=600,
                         help='Well lock timeout in seconds (default: 600 = 10 min)')
+    parser.add_argument('--select-by-std', action='store_true',
+                        help='Select best from top-100 by lowest STD instead of best score (BruteForce only)')
     args = parser.parse_args()
+
+    # Set env variable for --select-by-std (used in optimize_full_well)
+    if args.select_by_std:
+        os.environ['BF_SELECT_BY_STD'] = '1'
 
     # Require description for batch runs
     if (args.all or args.wells) and not args.description:

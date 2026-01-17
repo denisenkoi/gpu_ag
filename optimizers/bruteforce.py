@@ -54,6 +54,7 @@ class BruteForceOptimizer(BaseBlockOptimizer):
         long_segment_threshold: float = 50.0,
         selfcorr_threshold: float = 0.0,
         selfcorr_weight: float = 0.0,
+        select_by_std: bool = False,
     ):
         super().__init__(device, angle_range, angle_step, mse_weight, chunk_size)
         self.adaptive_step = adaptive_step
@@ -61,6 +62,7 @@ class BruteForceOptimizer(BaseBlockOptimizer):
         self.long_segment_threshold = long_segment_threshold
         self.selfcorr_threshold = selfcorr_threshold
         self.selfcorr_weight = selfcorr_weight
+        self.select_by_std = select_by_std
 
         if self.chunk_size is None:
             self.chunk_size = get_chunk_size()
@@ -215,9 +217,17 @@ class BruteForceOptimizer(BaseBlockOptimizer):
             pearsons_np = pearsons_final.cpu().numpy()
             mse_np = mse_final.cpu().numpy()
 
-            # EXPERIMENTAL: Select by best STD (lowest) instead of best score
-            best_std_idx = np.nanargmin(std_np)
-            final_best_idx = best_std_idx
+            # Select best candidate: by STD (optional) or by score (default)
+            if self.select_by_std:
+                # Fallback to top1 by score if all STD are NaN
+                if np.all(np.isnan(std_np)):
+                    print(f"    [WARNING] All STD values are NaN, falling back to top1 by score")
+                    final_best_idx = int(scores_np.argmax())
+                else:
+                    final_best_idx = int(np.nanargmin(std_np))
+            else:
+                # Default: select by best score WITH penalty (top1 by scores_with_penalty)
+                final_best_idx = int(scores_np.argmax())
 
             best_score = scores_np[final_best_idx]
             best_idx_global = combined[final_best_idx][1]
